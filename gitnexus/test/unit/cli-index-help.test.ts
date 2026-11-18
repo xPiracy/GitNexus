@@ -42,6 +42,7 @@ const allHelpCommands = [
   [],
   ['setup'],
   ['analyze'],
+  ['luau-graph'],
   ['index'],
   ['serve'],
   ['mcp'],

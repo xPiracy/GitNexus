@@ -335,6 +335,28 @@ program
   });
 
 program
+  .command('luau-graph <file>')
+  .description(
+    'Export a Luau workspace module graph as DOT (experimental; does not update the index)',
+  )
+  .option('--project <path>', 'Luau workspace directory (default: current directory)')
+  .option('--server <path>', 'Installed luau-lsp executable (default: luau-lsp on PATH)')
+  .option('--platform <platform>', 'Luau platform: roblox or standard', 'roblox')
+  .option(
+    '--security-level <level>',
+    'Roblox type security level (None, PluginSecurity, LocalUserSecurity, RobloxScriptSecurity)',
+    'PluginSecurity',
+  )
+  .option(
+    '--definitions <path>',
+    'Local Roblox type definitions (default: cached official download)',
+  )
+  .option('--docs <path>', 'Local API documentation JSON (default: cached official download)')
+  .option('--current-file', 'Export only the seed file dependency graph')
+  .option('--timeout <seconds>', 'Maximum LSP export time in seconds', '60')
+  .action(createLazyAction(() => import('./luau-graph.js'), 'luauGraphCommand'));
+
+program
   .command('index [path...]')
   .description(
     'Register an existing .gitnexus/ folder into the global registry (no re-analysis needed)',
