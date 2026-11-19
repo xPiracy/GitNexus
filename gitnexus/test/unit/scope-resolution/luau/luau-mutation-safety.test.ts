@@ -101,6 +101,30 @@ describe('Luau call targets after mutation', () => {
     expect(result.outgoing(run, 'CALLS').every((edge) => edge.targetId === second.id)).toBe(true);
   });
 
+  it('does not retain scalar evidence after an importer stores a mutable table in that field', async () => {
+    const result = await resolve({
+      'library.luau': 'return {slot = 0}',
+      'main.luau': [
+        'local M = require("./library")',
+        'local function first() end',
+        'local Child = {go = first}',
+        'M.slot = Child',
+        'unknownConsumer(M.slot)',
+        'local function run() Child.go() end',
+        'return run',
+      ].join('\n'),
+    });
+    expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+    expect(result.callsNamed('go')[0]?.status).not.toBe('resolved');
+    const run = result.node('main.luau', 'run', 'Function');
+    const first = result.node('main.luau', 'first', 'Function');
+    // The consumer receives Child through the imported table's replacement
+    // field. The producer's old numeric initializer cannot prove no escape.
+    const calls = result.outgoing(run, 'CALLS');
+    expect(calls.map((edge) => edge.targetId)).not.toContain(first.id);
+    expect(calls).toEqual([]);
+  });
+
   it('does not choose a known field when a computed initializer may overwrite it', async () => {
     const result = await resolve({
       'main.luau': [
@@ -149,6 +173,165 @@ describe('Luau call targets after mutation', () => {
     const second = result.node('main.luau', 'second', 'Function');
     expect(result.outgoing(run, 'CALLS').every((edge) => edge.targetId === second.id)).toBe(true);
   });
+
+  it('does not retain an inherited target after an importer replaces the metatable through an alias', async () => {
+    const result = await resolve({
+      'library.luau':
+        'local function first() end\nreturn setmetatable({}, {__index = {go = first}})',
+      'main.luau': [
+        'local M = require("./library")',
+        'local function second() end',
+        'local alias = M',
+        'setmetatable(alias, {__index = {go = second}})',
+        'local function run() M.go() end',
+        'return run',
+      ].join('\n'),
+    });
+    result.callsNamed('go');
+    expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+    const run = result.node('main.luau', 'run', 'Function');
+    const first = result.node('library.luau', 'first', 'Function');
+    const second = result.node('main.luau', 'second', 'Function');
+    // The alias denotes the imported allocation, so this is a real competing
+    // metatable write. Independent candidate budgets must not hide it.
+    const calls = result.outgoing(run, 'CALLS');
+    expect(calls.map((edge) => edge.targetId)).not.toContain(first.id);
+    expect(calls.every((edge) => edge.targetId === second.id)).toBe(true);
+  });
+
+  it.each(['nil', 'absent'])(
+    'retains an optional field back-reference installed by an importer metatable mutation (%s initializer)',
+    async (initializer) => {
+      const result = await resolve({
+        'library.luau':
+          'local function first() end\n' +
+          (initializer === 'nil' ? 'return {go = first, optional = nil}' : 'return {go = first}'),
+        'main.luau': [
+          'local Parent = require("./library")',
+          'local alias = Parent',
+          'setmetatable(alias, {__index = function() return Parent end})',
+          'unknownConsumer(table.freeze({value = Parent.optional}))',
+          'local function run() Parent.go() end',
+          'return run',
+        ].join('\n'),
+      });
+      expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+      expect(result.callsNamed('go')[0]?.status).not.toBe('resolved');
+      // The producer's table literal has no metatable, but its imported alias
+      // now returns that same mutable allocation through the optional field.
+      expect(result.outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS')).toEqual([]);
+    },
+  );
+
+  it('does not prove a plain receiver through a foreign-overwritten metatable getter', async () => {
+    const result = await resolve({
+      'library.luau': 'local Child = {}\nreturn {get = function() return Child end}',
+      'main.luau': [
+        'local Holder = require("./library")',
+        'local function first() end',
+        'local Parent = {go = first, optional = nil}',
+        'Holder.get = function() return Parent end',
+        'setmetatable(Holder.get(), {__index = function() return Parent end})',
+        'unknownConsumer(table.freeze({value = Parent.optional}))',
+        'local function run() Parent.go() end',
+        'return run',
+      ].join('\n'),
+    });
+    expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+    result.callsNamed('go');
+    // The replaced getter supplies Parent to setmetatable. An origin walk
+    // using only the producer's old getter would incorrectly prove it plain.
+    expect(result.outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS')).toEqual([]);
+  });
+
+  it('retains a direct escape through a foreign-overwritten getter', async () => {
+    const result = await resolve({
+      'library.luau': 'local Child = {}\nreturn {get = function() return Child end}',
+      'main.luau': [
+        'local Holder = require("./library")',
+        'local function first() end',
+        'local Parent = {go = first}',
+        'Holder.get = function() return Parent end',
+        'unknownConsumer(Holder.get())',
+        'local function run() Parent.go() end',
+        'return run',
+      ].join('\n'),
+    });
+    expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+    result.callsNamed('go');
+    // The ordinary escape walk must observe the replacement getter too;
+    // fixing only metatable mutation indexing leaves this direct escape lost.
+    expect(result.outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS')).toEqual([]);
+  });
+
+  it('retains replacement getter values when the write receiver is unresolved', async () => {
+    const result = await resolve({
+      'main.luau': [
+        'local function first() end',
+        'local Parent = {go = first}',
+        'local Other = {}',
+        'local Holder = {get = function() return Other end}',
+        'local function choose()',
+        '  if flag then return Holder end',
+        '  return Holder',
+        'end',
+        'choose().get = function() return Parent end',
+        'unknownConsumer(Holder.get())',
+        'local function run() Parent.go() end',
+        'return run',
+      ].join('\n'),
+    });
+    result.callsNamed('go');
+    // Both runtime branches select Holder. An unresolved receiver cannot
+    // erase the replacement getter, whose result exposes Parent to mutation.
+    // An index omitting that write cannot prove the old getter is unchanged.
+    expect(result.outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS')).toEqual([]);
+  });
+
+  it.each(['M', 'externalTable'])(
+    'preserves metatable safety when an exhausted candidate chain reaches %s',
+    async (origin) => {
+      const result = await resolve({
+        'library.luau':
+          'local function first() end\nreturn setmetatable({}, {__index = {go = first}})',
+        'main.luau': [
+          'local M = require("./library")',
+          'local function second() end',
+          'local function unrelated() end',
+          'local Other = {go = unrelated}',
+          `local function a0() return ${origin} end`,
+          ...Array.from(
+            { length: 189 },
+            (_, index) => `local function a${index + 1}() return a${index}() end`,
+          ),
+          'setmetatable(a189(), {__index = {go = second}})',
+          'local function run() M.go() end',
+          'local function runOther() Other.go() end',
+          'return {run, runOther}',
+        ].join('\n'),
+      });
+      expect(
+        result.bindings.filter((binding) => binding.kind === 'call' && binding.name === 'go'),
+      ).toHaveLength(2);
+      expect(result.graph.relationships.filter((edge) => edge.type === 'IMPORTS')).toHaveLength(1);
+      const calls = result.outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS');
+      const first = result.node('library.luau', 'first', 'Function');
+      const second = result.node('main.luau', 'second', 'Function');
+      // The long chain exceeds the candidate's ordinary evaluation budget.
+      // A known same-table origin or an opaque exhausted origin cannot prove
+      // this competing metatable write unrelated to the imported receiver.
+      expect(calls.map((edge) => edge.targetId)).not.toContain(first.id);
+      if (origin === 'externalTable') expect(calls).toEqual([]);
+      else expect(calls.every((edge) => edge.targetId === second.id)).toBe(true);
+      // Refusing the metatable-dependent target must not erase an unrelated
+      // plain table's fully known member target.
+      expect(
+        result
+          .outgoing(result.node('main.luau', 'runOther', 'Function'), 'CALLS')
+          .map((edge) => edge.targetId),
+      ).toEqual([result.node('main.luau', 'unrelated', 'Function').id]);
+    },
+  );
 
   it('records function-statement assignment on the original variable binder', async () => {
     const result = await resolve({
@@ -309,6 +492,33 @@ describe('Luau call targets after mutation', () => {
     const second = result.node('main.luau', 'second', 'Function');
     expect(result.outgoing(run, 'CALLS').every((edge) => edge.targetId === second.id)).toBe(true);
   });
+
+  it.each([0, 200])(
+    'preserves a known target while indexing %s unrelated local writes to the same field',
+    async (unrelatedWrites) => {
+      const result = await resolve({
+        'main.luau': [
+          'local function first() end',
+          'local Target = {go = first}',
+          'local Holder = {child = Target}',
+          'local Noise = {}',
+          'local alias = Noise',
+          ...Array.from({ length: unrelatedWrites }, () => 'alias.child = true'),
+          'Holder.child.marker = true',
+          'local function run() Target.go() end',
+          'return run',
+        ].join('\n'),
+      });
+      result.callsNamed('go');
+      // Only Noise has its child field changed. Comparing those receivers
+      // cannot exhaust the separate proof that Holder.child denotes Target.
+      expect(
+        result
+          .outgoing(result.node('main.luau', 'run', 'Function'), 'CALLS')
+          .map((edge) => edge.targetId),
+      ).toEqual([result.node('main.luau', 'first', 'Function').id]);
+    },
+  );
 
   it('does not spend a target proof budget on unrelated imported table writes', async () => {
     const result = await resolve({

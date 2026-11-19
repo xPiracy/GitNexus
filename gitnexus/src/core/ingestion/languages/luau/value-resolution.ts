@@ -16,6 +16,7 @@ import {
 } from './module-resolution.js';
 
 type Located = { readonly file: string; readonly position: string };
+type SourceValue = { readonly file: string; readonly value: LuauValue };
 type LuauCall = Extract<LuauValue, { kind: 'call' }>;
 interface EvaluationBudget {
   left: number;
@@ -24,6 +25,10 @@ interface EvaluationBudget {
   /** The once-per-workspace effect pass compares identities before applying its result. */
   readonly ignoreTableEscapes?: boolean;
   readonly ignoreForeignWrites?: boolean;
+  /** Nested raw write comparisons inherit the remaining bound and active set. */
+  readonly memberWriteComparison?: boolean;
+  /** Shared work allowance prevents nested candidate branches multiplying without a bound. */
+  readonly memberWriteWork?: { left: number };
   /** Mutable table identities used to derive a candidate purity proof. */
   readonly purityDependencies?: Set<string>;
 }
@@ -53,12 +58,19 @@ interface TargetResult {
   readonly reason: string;
 }
 
+interface MetatableReceiverResult {
+  readonly value: Resolved;
+  readonly exhausted: boolean;
+}
+
 interface PotentialOrigins {
   readonly file: string;
   readonly origins: readonly string[];
   readonly opaque: boolean;
   /** Empty lists also matter: a later store may expose a new reachable table. */
   readonly storedLengths: ReadonlyMap<string, number>;
+  /** Member proofs require the complete local and foreign receiver index. */
+  readonly memberProofPending: boolean;
   validatedAfterWrites: boolean;
 }
 
@@ -104,7 +116,13 @@ export class LuauValueResolver {
   >();
   private readonly metatableCalls = new Map<string, readonly LuauCall[]>();
   private readonly foreignMetatableCalls: { file: string; call: LuauCall }[] = [];
+  private readonly metatableReceivers = new WeakMap<
+    LuauCall,
+    Map<string, MetatableReceiverResult>
+  >();
+  private metatableMutationTargets: ReadonlySet<string> | undefined;
   private escapedTables: Map<string, string> | undefined;
+  private tableEscapesReady = false;
   private readonly readOnlyFunctions = new Map<string, ReadonlySet<string> | null>();
   private foreignWriteTargets: Map<string, Set<string | null>> | undefined;
   private writeTargetsReady = false;
@@ -116,7 +134,10 @@ export class LuauValueResolver {
     value: LuauValue;
     exhausted: boolean;
   }[] = [];
-  private readonly storedTableValues = new Map<string, { file: string; value: LuauValue }[]>();
+  private readonly storedTableValues = new Map<
+    string,
+    (SourceValue & { readonly name: string | null })[]
+  >();
   private readonly unknownStorageValues: { file: string; value: LuauValue }[] = [];
   private readonly reachableTables = new Map<string, readonly string[]>();
   private readonly limitOrigins = new Set<string>();
@@ -203,6 +224,59 @@ export class LuauValueResolver {
     );
   }
 
+  /** A candidate has its own query budget, independent of the queried object. */
+  private metatableReceiver(
+    file: string,
+    call: LuauCall,
+    context: EvaluationBudget,
+  ): MetatableReceiverResult {
+    const receiver = call.args[0];
+    if (!receiver) return { value: unknown('missing-metatable-receiver'), exhausted: false };
+    // With both ignore flags, this origin-only query reads captured bindings,
+    // tables and raw writes, never mutable receiver indexes or escape results.
+    // Other modes must wait for their relevant inputs to finish changing.
+    // Each source call has at most four flag modes; source file is explicit
+    // so reused fact objects cannot collide across modules.
+    const capturedFactsOnly = context.ignoreTableEscapes && context.ignoreForeignWrites;
+    const reusable =
+      !context.purityDependencies &&
+      (capturedFactsOnly ||
+        (this.writeTargetsReady && (context.ignoreTableEscapes || this.tableEscapesReady)));
+    const mode = (context.ignoreTableEscapes ? 1 : 0) | (context.ignoreForeignWrites ? 2 : 0);
+    const cacheKey = `${file}\0${mode}`;
+    let cached = reusable ? this.metatableReceivers.get(call) : undefined;
+    const prior = cached?.get(cacheKey);
+    if (prior) return prior;
+    const comparison: EvaluationBudget = {
+      left: 512,
+      metatableOriginOnly: true,
+      ignoreTableEscapes: context.ignoreTableEscapes,
+      ignoreForeignWrites: context.ignoreForeignWrites,
+      // This is a separate candidate query, not another raw-write sibling.
+      // Its raw comparisons allocate their own finite work pool and inherit
+      // this path bound. Origin-only mode prevents recursive metatable-list
+      // validation, so unrelated workspace candidates cannot drain a local
+      // write list's allowance or create an unbounded budget-refill cycle.
+      memberWriteComparison: true,
+      // Dependency collection is an observable result of this query. Keep it
+      // live and bypass the memo rather than losing evidence on a cache hit.
+      purityDependencies: context.purityDependencies,
+    };
+    const value = this.evaluate(file, receiver, new Set(), comparison);
+    // A nested evaluator may mask the immediate limit reason. Preserve the
+    // budget state separately so an opaque exhausted candidate stays unsafe.
+    const result = { value, exhausted: comparison.left < 0 };
+    // The fresh stack and fixed budget make even a bounded unknown a complete
+    // repeatable query. Unknown receivers still undergo the origin check at
+    // the call site; caching never turns a failed lookup into a no-alias proof.
+    if (reusable) {
+      cached ??= new Map();
+      cached.set(cacheKey, result);
+      this.metatableReceivers.set(call, cached);
+    }
+    return result;
+  }
+
   private tableIdentity(value: Extract<Resolved, { kind: 'table' }>): string {
     return JSON.stringify([value.file, value.position, value.instance ?? null]);
   }
@@ -211,21 +285,74 @@ export class LuauValueResolver {
     return `@origin:${JSON.stringify([value.file, value.position])}`;
   }
 
+  /** Completed source-only proof for nullable fields without an __index fallback. */
+  private collectMetatableMutationTargets(): ReadonlySet<string> | undefined {
+    if (!this.writeTargetsReady) return undefined;
+    if (this.metatableMutationTargets) return this.metatableMutationTargets;
+    const targets = new Set<string>();
+    for (const [path, calls] of this.metatableCalls) {
+      const traced = new Map<LuauValue | string, boolean>();
+      for (const call of calls) {
+        const receiver = call.args[0];
+        if (!receiver) continue;
+        const { value, exhausted } = this.metatableReceiver(path, call, {
+          left: 512,
+          ignoreTableEscapes: true,
+        });
+        if (value.kind === 'table') {
+          if (!value.frozen) targets.add(this.tableIdentity(value));
+        } else if (value.kind === 'unknown') {
+          const key = this.potentialOriginKey(path, receiver);
+          let opaque = traced.get(key);
+          if (opaque === undefined) {
+            // This deliberately coarse walk cannot ask for the field proof
+            // being built here. Do not share its entries with the precise
+            // origin memo: their member semantics are different.
+            const result = this.traceTableOrigins(path, receiver, false);
+            for (const origin of result.origins) targets.add(origin);
+            opaque = result.opaque;
+            traced.set(key, opaque);
+          }
+          // Exhaustion belongs to this candidate, even when its source root
+          // was already traced for a non-exhausted candidate earlier.
+          if (opaque && exhausted) targets.add(UNKNOWN_TABLE_ORIGIN);
+        }
+      }
+    }
+    // Neither partial writes nor a partial metatable index can prove absence.
+    this.metatableMutationTargets = targets;
+    return targets;
+  }
+
   /** Equivalent inputs to origin tracing only; never used to resolve a target. */
   private potentialOriginKey(path: string, root: LuauValue): LuauValue | string {
     let value = root;
-    // The provenance walk follows a member's base regardless of field spelling.
-    while (value.kind === 'member') value = value.base;
+    const members: string[] = [];
+    while (value.kind === 'member') {
+      members.push(value.name);
+      value = value.base;
+    }
+    let originKey: LuauValue | string = value;
     if (value.kind === 'table' || value.kind === 'function')
-      return JSON.stringify([path, value.kind, value.position]);
+      originKey = JSON.stringify([path, value.kind, value.position]);
     if (value.kind === 'name') {
       const file = this.files.get(path);
       const binding = file && this.binding(file, value.name, value.scope, value.at);
-      if (binding)
+      if (binding && file) {
+        // Member evaluation may observe a different assignment or captured
+        // mutation at another occurrence. Share only immutable base bindings.
+        if (
+          members.length &&
+          file.bindings
+            .get(binding.scope)
+            ?.get(binding.name)
+            ?.some((entry) => entry.writeScope)
+        )
+          return root;
         // Select the lexical binder first. Its complete candidate group is
         // identical across occurrences, including writes that share its ID.
         // The explicit opaque seed preserves the parameter branch of tracing.
-        return JSON.stringify([
+        originKey = JSON.stringify([
           path,
           'binding',
           binding.scope,
@@ -233,10 +360,15 @@ export class LuauValueResolver {
           binding.bindingPosition ?? null,
           Boolean(binding.parameter && binding.value.kind === 'unknown'),
         ]);
+      }
     }
+    // A scalar field and a table field do not expose the same value. Include
+    // the complete member path instead of conflating either with its receiver.
+    if (members.length)
+      return typeof originKey === 'string' ? JSON.stringify([originKey, members]) : root;
     // Calls and compound unknowns keep occurrence identity; their children
     // and evaluation context have not been proven equivalent here.
-    return value;
+    return originKey;
   }
 
   /**
@@ -260,6 +392,7 @@ export class LuauValueResolver {
     let result = this.potentialOriginsCache.get(cacheKey);
     if (
       result?.file !== path ||
+      (result.memberProofPending && this.writeTargetsReady) ||
       (!result.validatedAfterWrites &&
         [...result.storedLengths].some(
           ([identity, length]) => (this.storedTableValues.get(identity)?.length ?? 0) !== length,
@@ -300,11 +433,16 @@ export class LuauValueResolver {
     return origins;
   }
 
-  private traceTableOrigins(path: string, root: LuauValue): PotentialOrigins {
-    const pending = [{ file: path, value: root }];
-    const seen = new Map<string, Set<LuauValue>>();
+  private traceTableOrigins(
+    path: string,
+    root: LuauValue,
+    preciseMembers = true,
+  ): PotentialOrigins {
+    const pending = [{ file: path, value: root, frozen: false, invoked: false }];
+    const seen = new Map<string, Map<LuauValue, number>>();
     const origins = new Set<string>();
     const storedLengths = new Map<string, number>();
+    let memberProofPending = false;
     let opaque = false;
     for (let index = 0; index < pending.length; index++) {
       const entry = pending[index]!;
@@ -313,12 +451,18 @@ export class LuauValueResolver {
         opaque = true;
         continue;
       }
-      const visited = seen.get(entry.file) ?? new Set<LuauValue>();
-      if (visited.has(entry.value)) continue;
-      visited.add(entry.value);
+      const visited = seen.get(entry.file) ?? new Map<LuauValue, number>();
+      // The same allocation may escape both before and after a shallow freeze.
+      // Visit both states so a frozen path never erases an earlier mutable one.
+      // A callable reached through an unresolved invocation may expose its
+      // returns. Keep that path distinct from an ordinary field-value read.
+      const state = (entry.frozen ? 2 : 1) * (entry.invoked ? 4 : 1);
+      const prior = visited.get(entry.value) ?? 0;
+      if (prior & state) continue;
+      visited.set(entry.value, prior | state);
       seen.set(entry.file, visited);
-      const enqueue = (value: LuauValue): void => {
-        pending.push({ file: entry.file, value });
+      const enqueue = (value: LuauValue, frozen = entry.frozen, invoked = entry.invoked): void => {
+        pending.push({ file: entry.file, value, frozen, invoked });
       };
       const value = entry.value;
       if (value.kind === 'name') {
@@ -333,9 +477,11 @@ export class LuauValueResolver {
       } else if (value.kind === 'function') {
         for (const returned of file.facts.functionReturns[value.position] ?? []) enqueue(returned);
       } else if (value.kind === 'table') {
-        origins.add(this.tableOrigin({ file: entry.file, position: value.position }));
+        if (!entry.frozen)
+          origins.add(this.tableOrigin({ file: entry.file, position: value.position }));
         const table = file.tables.get(value.position);
-        for (const child of table?.values ?? Object.values(table?.fields ?? {})) enqueue(child);
+        for (const child of table?.values ?? Object.values(table?.fields ?? {}))
+          enqueue(child, false);
         const identity = this.tableIdentity({
           kind: 'table',
           file: entry.file,
@@ -343,9 +489,20 @@ export class LuauValueResolver {
         });
         const storedValues = this.storedTableValues.get(identity) ?? [];
         storedLengths.set(identity, storedValues.length);
-        for (const stored of storedValues) pending.push(stored);
+        for (const stored of storedValues)
+          pending.push({ ...stored, frozen: false, invoked: entry.invoked });
       } else if (value.kind === 'member') {
-        enqueue(value.base);
+        // Passing a field passes its value, not the containing table. Track
+        // every proven candidate, including conditional frozen assignments;
+        // the existing walk still follows mutable descendants and backrefs.
+        if (!this.writeTargetsReady) memberProofPending = true;
+        const candidates = preciseMembers
+          ? this.traceMemberValues(entry.file, value, entry.invoked)
+          : undefined;
+        if (candidates)
+          for (const candidate of candidates)
+            pending.push({ ...candidate, frozen: entry.frozen, invoked: entry.invoked });
+        else enqueue(value.base);
       } else if (value.kind === 'call') {
         const imported = file.parsed.parsedImports.find(
           (item) => item.atRange && sameRange(item.atRange, value.at),
@@ -359,17 +516,36 @@ export class LuauValueResolver {
             if (target.status !== 'resolved') opaque = true;
             else
               for (const returned of this.files.get(target.filePath)?.facts.returns ?? [])
-                pending.push({ file: target.filePath, value: returned });
+                pending.push({
+                  file: target.filePath,
+                  value: returned,
+                  frozen: entry.frozen,
+                  invoked: entry.invoked,
+                });
           } catch {
             opaque = true;
           }
-        } else if (this.nonMutatingBuiltin(file, value) || this.isSetMetatable(file, value)) {
-          for (const argument of value.args) enqueue(argument);
+        } else if (this.nonMutatingBuiltin(file, value)) {
+          // These inspection builtins return scalars. Only table.freeze
+          // returns its argument, and that root is shallowly frozen.
+          if (value.callee.kind === 'member' && value.callee.name === 'freeze' && value.args[0])
+            enqueue(value.args[0], true);
+        } else if (this.isSetMetatable(file, value)) {
+          if (value.args[0]) enqueue(value.args[0]);
+          // Freezing the object does not freeze its existing metatable.
+          if (value.args[1]) enqueue(value.args[1], false);
         } else {
+          // Evaluating a callee can read members without the origin walk
+          // visiting a member entry. Recheck that hidden dependency once
+          // receiver indexing is complete, even if recorded stores did not grow.
+          if (!this.writeTargetsReady) memberProofPending = true;
           const budget: EvaluationBudget = {
             left: 512,
             ignoreTableEscapes: true,
-            ignoreForeignWrites: true,
+            // After write indexing, an overwritten getter cannot supply only
+            // its former return value. An unknown callee instead exposes all
+            // stored alternatives.
+            ignoreForeignWrites: !this.writeTargetsReady,
             // Origin tracing must not recursively validate the metatable
             // mutations whose possible receivers this walk is finding.
             metatableOriginOnly: true,
@@ -380,12 +556,22 @@ export class LuauValueResolver {
             for (const returned of this.files.get(callee.file)?.facts.functionReturns[
               callee.position
             ] ?? [])
-              pending.push({ file: callee.file, value: returned });
+              pending.push({
+                file: callee.file,
+                value: returned,
+                frozen: entry.frozen,
+                invoked: entry.invoked,
+              });
           } else {
             // An unresolved callable can return an input. Do not conflate a
             // resolved method's receiver with the value that method returns.
             for (const argument of value.args) enqueue(argument);
-            enqueue(value.callee);
+            // Follow possible callable returns through aliases as well as
+            // direct members. This is a conservative may-invoke marker, not
+            // an invocation count or a CALLS target. Retain it on joined
+            // return paths so an outer higher-order call is not forgotten.
+            // A colon callee is its receiver, whose prior fallback remains.
+            enqueue(value.callee, entry.frozen, value.method ? entry.invoked : true);
           }
         }
       } else if (value.kind === 'unknown' && value.possibleValues) {
@@ -402,8 +588,122 @@ export class LuauValueResolver {
       origins: [...origins],
       opaque,
       storedLengths,
+      memberProofPending,
       validatedAfterWrites: this.writeTargetsReady,
     };
+  }
+
+  /** All possible present-field values; undefined retains the conservative fallback. */
+  private traceMemberValues(
+    path: string,
+    value: Extract<LuauValue, { kind: 'member' }>,
+    invoked = false,
+  ): readonly SourceValue[] | undefined {
+    // During receiver indexing, an absent write may simply be unvisited.
+    // Cached walks that take this conservative branch depend on this phase.
+    if (!this.writeTargetsReady) return undefined;
+    const budget: EvaluationBudget = {
+      left: 512,
+      ignoreTableEscapes: true,
+      metatableOriginOnly: true,
+    };
+    const base = this.evaluate(path, value.base, new Set(), budget);
+    if (base.kind !== 'table') return undefined;
+    const file = this.files.get(base.file);
+    const table = file?.tables.get(base.position);
+    if (!file || !table || table.incomplete) return undefined;
+    const identity = this.tableIdentity(base);
+    const foreign = this.foreignWriteTargets?.get(identity);
+    // Ordinary foreign-written values retain their conservative storage
+    // fallback. An actual call can instead follow every possible callable
+    // return without treating the field's module as the returned value.
+    if (foreign?.has(null) || (foreign?.has(value.name) && !invoked)) return undefined;
+    const initial = Object.hasOwn(table.fields, value.name) ? table.fields[value.name] : undefined;
+    // An absent/nil field may invoke __index. Nullable candidates below need
+    // a completed proof that no constructor or later alias installs one.
+    const candidates: SourceValue[] = initial ? [{ file: base.file, value: initial }] : [];
+    // This completed index includes local and foreign writes. Keep each RHS
+    // in its own source file: aliases and function returns are lexical there.
+    for (const write of this.storedTableValues.get(identity) ?? []) {
+      if (write.name !== value.name && write.name !== null) continue;
+      if (write.name === null) return undefined;
+      candidates.push(write);
+    }
+    const values: SourceValue[] = [];
+    let plainReceiver: boolean | undefined;
+    const canTraceNullableValue = (): boolean => {
+      if (plainReceiver === undefined) {
+        const mutations = this.collectMetatableMutationTargets();
+        plainReceiver = Boolean(
+          !base.metatable &&
+          mutations &&
+          !mutations.has(identity) &&
+          !mutations.has(this.tableOrigin(base)) &&
+          !mutations.has(UNKNOWN_TABLE_ORIGIN),
+        );
+      }
+      return plainReceiver;
+    };
+    // A later named write does not erase the earlier absent state, especially
+    // when conditional. Apply the same __index guard before tracing any value.
+    if (!initial && !canTraceNullableValue()) return undefined;
+    for (const source of candidates) {
+      const sourceFile = this.files.get(source.file);
+      if (!sourceFile) return undefined;
+      let candidate = source.value;
+      const seen = new Set<LuauValue>();
+      while (candidate.kind === 'name') {
+        if (--budget.left < 0 || seen.has(candidate)) return undefined;
+        seen.add(candidate);
+        const binding = this.binding(sourceFile, candidate.name, candidate.scope, candidate.at);
+        if (
+          !binding ||
+          (sourceFile.bindings.get(binding.scope)?.get(binding.name) ?? []).some(
+            (entry) =>
+              entry.bindingPosition === binding.bindingPosition && entry.writeScope !== undefined,
+          )
+        )
+          // Keep the uncertain name for the all-bindings origin walk below.
+          // Selecting one assignment would lose a possible child/backref;
+          // substituting this field's owner would invent a different value.
+          break;
+        candidate = binding.value;
+      }
+      if (--budget.left < 0) return undefined;
+      // Scalars and function values do not expose their containing table.
+      // A passed function is not evidence that its return value was invoked.
+      if (candidate.kind === 'function') {
+        if (invoked) values.push({ file: source.file, value: candidate });
+        continue;
+      }
+      if (candidate.kind === 'string') continue;
+      if (candidate.kind === 'unknown') {
+        if (!candidate.possibleValues && ['number', 'true', 'false'].includes(candidate.reason))
+          continue;
+        if (!canTraceNullableValue()) return undefined;
+        values.push({ file: source.file, value: candidate });
+        continue;
+      }
+      if (candidate.kind === 'table') {
+        values.push({ file: source.file, value: candidate });
+        continue;
+      }
+      if (
+        candidate.kind === 'call' &&
+        !candidate.method &&
+        this.nonMutatingBuiltin(sourceFile, candidate)
+      ) {
+        if (candidate.callee.kind === 'member' && candidate.callee.name === 'freeze')
+          values.push({ file: source.file, value: candidate });
+        continue;
+      }
+      // With no applicable __index, the stored expression supplies the
+      // field's possible values. Unknown does not make its owner a value;
+      // the normal walk still follows children, backrefs and opaque results.
+      if (!canTraceNullableValue()) return undefined;
+      values.push({ file: source.file, value: candidate });
+    }
+    return values;
   }
 
   /** Nonmutating builtins; table.freeze's returned identity is modeled explicitly. */
@@ -542,8 +842,8 @@ export class LuauValueResolver {
         }
         if (targets.length) effects.push({ targets, ...(proof ? { dependencies } : {}) });
       }
-    // Storing a table in an unknown receiver exposes it independently of any
-    // call we can resolve (for example, a host-owned global registry).
+    // Unknown storage may retain a table or a callable that later exposes one.
+    // Preserve that possible effect without inventing an invocation edge.
     for (const stored of this.unknownStorageValues) {
       const budget: EvaluationBudget = {
         left: 512,
@@ -551,7 +851,7 @@ export class LuauValueResolver {
       };
       const table = this.evaluate(stored.file, stored.value, new Set(), budget);
       if (table.kind === 'table') effects.push({ targets: this.escapableTables(table) });
-      else if (table.kind === 'unknown')
+      else if (table.kind === 'unknown' || table.kind === 'function')
         effects.push({
           targets: this.potentialTableOrigins(stored.file, stored.value, budget.left < 0),
         });
@@ -592,6 +892,7 @@ export class LuauValueResolver {
     }
     for (let index = 0; index < pending.length; index++)
       for (const targets of dependents.get(pending[index]!) ?? []) invalidate(targets);
+    this.tableEscapesReady = true;
     return escaped;
   }
 
@@ -616,14 +917,16 @@ export class LuauValueResolver {
               value: write.base,
               exhausted: budget.left < 0,
             });
-          if (this.mayBeTableArgument(file, write.value))
-            this.unknownStorageValues.push({ file: path, value: write.value });
+          // A replacement getter can expose a table even though its RHS is
+          // a function, not a direct table argument. Keep the source value;
+          // the effect walk excludes scalars and follows callable returns.
+          this.unknownStorageValues.push({ file: path, value: write.value });
           continue;
         }
         if (receiver.frozen) continue;
         const identity = this.tableIdentity(receiver);
         const values = this.storedTableValues.get(identity) ?? [];
-        values.push({ file: path, value: write.value });
+        values.push({ file: path, value: write.value, name: write.name });
         this.storedTableValues.set(identity, values);
         if (receiver.file === path) {
           const local = this.localWriteTargets.get(identity) ?? [];
@@ -758,6 +1061,10 @@ export class LuauValueResolver {
     budget: EvaluationBudget,
   ): Resolved {
     if (--budget.left < 0) return unknown('value-resolution-limit');
+    if (budget.memberWriteWork && --budget.memberWriteWork.left < 0) {
+      budget.left = -1;
+      return unknown('member-write-work-limit');
+    }
     if (active.has(value)) return unknown('cyclic-value');
     const file = this.files.get(filePath);
     if (!file) return unknown('unindexed-module');
@@ -846,32 +1153,27 @@ export class LuauValueResolver {
                   (candidate.file === filePath && sameRange(candidate.call.at, value.at))
                 )
                   continue;
-                // An alias can itself be initialized by this setmetatable
-                // call. Compare its allocation with a separate, bounded walk
-                // so that the current validation does not create a false cycle.
-                const comparison: EvaluationBudget = {
-                  left: budget.left,
-                  metatableOriginOnly: true,
-                  ignoreTableEscapes: budget.ignoreTableEscapes,
-                  ignoreForeignWrites: budget.ignoreForeignWrites,
-                };
-                const other = this.evaluate(
+                // Compare aliases with a fresh stack and budget. Hundreds of
+                // unrelated receivers must not exhaust this object's proof.
+                const { value: other, exhausted } = this.metatableReceiver(
                   candidate.file,
-                  candidate.call.args[0],
-                  new Set(),
-                  comparison,
+                  candidate.call,
+                  budget,
                 );
-                budget.left = comparison.left;
-                if (budget.left < 0) return unknown('value-resolution-limit');
                 if (same(object, other)) return unknown('multiple-metatable-writes');
                 if (other.kind === 'unknown') {
                   const origins = this.potentialTableOrigins(
                     candidate.file,
                     candidate.call.args[0],
-                    false,
+                    exhausted,
                   );
                   if (origins.includes(this.tableOrigin(object)))
                     return unknown('uncertain-metatable-write');
+                  // Exhaustion with an opaque frontier cannot establish that
+                  // the candidate is unrelated. Refuse this constructor, but
+                  // do not spend the caller's budget or poison other tables.
+                  if (origins.includes(UNKNOWN_TABLE_ORIGIN))
+                    return unknown('metatable-receiver-resolution-limit');
                 }
               }
             }
@@ -926,6 +1228,10 @@ export class LuauValueResolver {
     field = false,
   ): Resolved {
     if (--budget.left < 0) return unknown('member-resolution-limit');
+    if (budget.memberWriteWork && --budget.memberWriteWork.left < 0) {
+      budget.left = -1;
+      return unknown('member-write-work-limit');
+    }
     if (base.kind !== 'table')
       return unknown(base.kind === 'unknown' ? base.reason : 'non-table-receiver');
     const file = this.files.get(base.file)!;
@@ -961,12 +1267,37 @@ export class LuauValueResolver {
     const localWrites = budget.ignoreForeignWrites
       ? [...(fileWrites?.get(name) ?? []), ...(fileWrites?.get(null) ?? [])]
       : (this.localWriteTargets.get(this.tableIdentity(base)) ?? []);
+    // One fixed allowance per outer candidate, shared across all nested
+    // branches. Both path depth and total work remain bounded independently.
+    const comparisonWork = budget.memberWriteWork ?? { left: 512 * localWrites.length };
     for (const write of localWrites) {
       if (write.name !== name && write.name !== null) continue;
-      const receiver = budget.ignoreForeignWrites
-        ? this.evaluate(base.file, write.base, active, budget)
-        : base;
-      if (budget.left < 0) return unknown('member-resolution-limit');
+      let receiver: Resolved = base;
+      if (budget.ignoreForeignWrites) {
+        // Sibling candidates do not spend this member's proof budget. Keep
+        // the active set, and never reset a nested comparison's bound: raw
+        // receivers can themselves read members and revisit the same writes.
+        // Separate sibling branches; their combined cost is not path depth.
+        const comparison: EvaluationBudget = {
+          ...budget,
+          left: budget.memberWriteComparison ? budget.left : 512,
+          memberWriteComparison: true,
+          memberWriteWork: comparisonWork,
+        };
+        receiver = this.evaluate(base.file, write.base, active, comparison);
+        // An exhausted candidate cannot establish a target. Refuse this
+        // member and preserve exhaustion for the downstream effect-origin
+        // walk. No partial/active-dependent result is memoized.
+        if (comparison.left < 0) {
+          budget.left = comparison.left;
+          return unknown('member-write-receiver-resolution-limit');
+        }
+        // An unresolved receiver may alias this table. Continuing cannot
+        // establish a member value and can repeatedly explore cyclic sibling
+        // writes. Refuse now; indexing separately retains the receiver and
+        // stored-value effects, including replacement getter functions.
+        if (receiver.kind === 'unknown') return unknown('uncertain-member-write-receiver');
+      }
       if (same(base, receiver)) {
         if (budget.ignoreForeignWrites && receiver.kind === 'table' && receiver.frozen) continue;
         if (write.name === null) return unknown('computed-member-write');
