@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -114,10 +123,68 @@ describe('Luau launch configuration', () => {
     expect(requests).toEqual([]);
   });
 
+  it.each(['project-relative', 'absolute'])(
+    'selects a %s sourcemap instead of assuming the default project map',
+    async (kind) => {
+      const sourcemapFile = path.join(kind === 'absolute' ? root : project, 'dev.sourcemap.json');
+      await writeFile(sourcemapFile, '{"name":"SyntheticGame","className":"DataModel"}');
+      const config = await prepareLuauConfiguration({
+        projectPath: project,
+        cachePath: cache,
+        sourcemapPath: kind === 'absolute' ? sourcemapFile : 'dev.sourcemap.json',
+      });
+      expect(config.workspaceConfiguration).toEqual({
+        platform: { type: 'roblox' },
+        sourcemap: { sourcemapFile },
+      });
+    },
+  );
+
+  it('canonicalizes a sourcemap through a directory link outside the project', async () => {
+    const generated = path.join(root, 'generated maps');
+    await mkdir(generated);
+    const sourcemapFile = path.join(generated, 'dev.json');
+    await writeFile(sourcemapFile, '{}');
+    // Directory junctions also work on Windows without file-symlink privileges.
+    await symlink(generated, path.join(project, 'maps'), 'junction');
+    const config = await prepareLuauConfiguration({
+      projectPath: project,
+      cachePath: cache,
+      sourcemapPath: 'maps/dev.json',
+    });
+    expect(config.workspaceConfiguration.sourcemap).toEqual({ sourcemapFile });
+  });
+
+  it.each(['missing.json', '.'])(
+    'rejects a missing or non-file sourcemap: %s',
+    async (sourcemapPath) => {
+      await expect(
+        prepareLuauConfiguration({ projectPath: project, cachePath: cache, sourcemapPath }),
+      ).rejects.toThrow(/sourcemap/i);
+      expect(requests).toEqual([]);
+    },
+  );
+
+  it.each(['not json', '[]', 'null', '"map"'])(
+    'rejects invalid sourcemap JSON before downloading: %s',
+    async (contents) => {
+      await writeFile(path.join(project, 'dev.json'), contents);
+      await expect(
+        prepareLuauConfiguration({
+          projectPath: project,
+          cachePath: cache,
+          sourcemapPath: 'dev.json',
+        }),
+      ).rejects.toThrow(/sourcemap.*JSON/i);
+      expect(requests).toEqual([]);
+    },
+  );
+
   it.each([
     [{ platform: 'lua' }, 'platform'],
     [{ securityLevel: '../unsafe' }, 'security level'],
     [{ platform: 'standard', definitionsPath: 'types.d.luau' }, 'Roblox'],
+    [{ platform: 'standard', sourcemapPath: 'dev.json' }, '--platform roblox'],
   ])('rejects invalid settings before downloading: %j', async (options, message) => {
     await expect(
       prepareLuauConfiguration({ projectPath: project, cachePath: cache, ...options }),

@@ -1,0 +1,21 @@
+{
+  "name": "tree-sitter-luau",
+  "version": "0.3.0-g71b03e6-gitnexus.1",
+  "description": "Luau grammar for tree-sitter, maintained GitNexus vendor patch",
+  "repository": "https://github.com/polychromatist/tree-sitter-luau",
+  "license": "MIT",
+  "main": "bindings/node/index.js",
+  "types": "bindings/node/index.d.ts",
+  "_vendoredBy": "gitnexus - pinned public upstream grammar plus focused syntax/scanner fixes; see README.md and patches/gitnexus.patch. No lifecycle scripts or vendored dependencies.",
+  "_upstreamCommit": "71b03e66b2c8dd04e0133c9b998a54a58f239ca4",
+  "_grammarAbi": 14,
+  "_generatorVersion": "0.25.1",
+  "peerDependencies": {
+    "tree-sitter": "0.25.1"
+  },
+  "peerDependenciesMeta": {
+    "tree-sitter": {
+      "optional": true
+    }
+  }
+}

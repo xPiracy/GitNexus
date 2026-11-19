@@ -50,6 +50,8 @@ export interface LuauConfigurationOptions {
   securityLevel?: string;
   definitionsPath?: string;
   docsPath?: string;
+  /** Optional existing Roblox map; relative paths use projectPath. */
+  sourcemapPath?: string;
   /** Defaults to the existing GitNexus home, never the game checkout. */
   cachePath?: string;
   signal?: AbortSignal;
@@ -59,7 +61,10 @@ export interface LuauLaunchConfiguration {
   projectPath: string;
   command: string;
   args: string[];
-  workspaceConfiguration: { platform: { type: LuauPlatform } };
+  workspaceConfiguration: {
+    platform: { type: LuauPlatform };
+    sourcemap?: { sourcemapFile: string };
+  };
   initializationParams: Record<string, unknown>;
 }
 
@@ -140,6 +145,29 @@ async function localSupport(filePath: string): Promise<string> {
   }
   validateSupport(await readFile(filePath), filePath);
   return filePath;
+}
+
+/** Maps may be generated outside the checkout; validate without relocating or rewriting them. */
+async function localSourcemap(filePath: string): Promise<string> {
+  const canonicalPath = await realpath(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    throw new Error(
+      `Roblox sourcemap does not exist: ${filePath}. Generate one with rojo sourcemap --include-non-scripts default.project.json --output sourcemap.json, or select it with --sourcemap.`,
+    );
+  });
+  if (!(await stat(canonicalPath)).isFile()) {
+    throw new Error(`Roblox sourcemap must be a file: ${canonicalPath}`);
+  }
+  const contents = await readFile(canonicalPath, 'utf8');
+  try {
+    const value: unknown = JSON.parse(contents);
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Expected an object');
+    }
+  } catch {
+    throw new Error(`Invalid Roblox sourcemap JSON (expected an object): ${canonicalPath}`);
+  }
+  return canonicalPath;
 }
 
 async function fetchSupport(relativeUrl: string, signal: AbortSignal): Promise<Response> {
@@ -236,9 +264,21 @@ export async function prepareLuauConfiguration(
   if (platform === 'standard' && options.definitionsPath !== undefined) {
     throw new Error('--definitions supplies Roblox types and requires --platform roblox.');
   }
+  if (platform === 'standard' && options.sourcemapPath !== undefined) {
+    throw new Error('--sourcemap supplies a Roblox instance map and requires --platform roblox.');
+  }
   const projectPath = await realpath(options.projectPath);
   if (!(await stat(projectPath)).isDirectory()) {
     throw new Error(`Luau project must be a directory: ${projectPath}`);
+  }
+  const workspaceConfiguration: LuauLaunchConfiguration['workspaceConfiguration'] = {
+    platform: { type: platform },
+  };
+  if (options.sourcemapPath !== undefined) {
+    // Validate before support downloads or server startup; keep callers without a map unchanged.
+    workspaceConfiguration.sourcemap = {
+      sourcemapFile: await localSourcemap(path.resolve(projectPath, options.sourcemapPath)),
+    };
   }
   const cachePath = path.resolve(options.cachePath ?? path.join(getGlobalDir(), 'luau-lsp'));
   const args = ['lsp'];
@@ -269,7 +309,7 @@ export async function prepareLuauConfiguration(
         ? path.resolve(options.serverPath)
         : (options.serverPath ?? 'luau-lsp'),
     args,
-    workspaceConfiguration: { platform: { type: platform } },
+    workspaceConfiguration,
     initializationParams: initializationParams(projectPath),
   };
 }

@@ -342,6 +342,7 @@ program
   .option('--project <path>', 'Luau workspace directory (default: current directory)')
   .option('--server <path>', 'Installed luau-lsp executable (default: luau-lsp on PATH)')
   .option('--platform <platform>', 'Luau platform: roblox or standard', 'roblox')
+  .option('--sourcemap <path>', 'Roblox sourcemap JSON (default: sourcemap.json in --project)')
   .option(
     '--security-level <level>',
     'Roblox type security level (None, PluginSecurity, LocalUserSecurity, RobloxScriptSecurity)',

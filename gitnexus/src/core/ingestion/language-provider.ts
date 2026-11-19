@@ -279,6 +279,23 @@ interface LanguageProviderConfig {
    */
   readonly incrementalResolutionGroup?: (filePath: string) => string | undefined;
 
+  /**
+   * A non-source input whose edit, addition, or deletion can change resolution
+   * for an existing group. Return the same provider-local key used by
+   * incrementalResolutionGroup, or undefined for unrelated paths. Called only
+   * for providers represented by current or changed source files. Paths are
+   * repo-relative; derive the key without reading the possibly deleted input.
+   */
+  readonly incrementalResolutionContext?: (filePath: string) => string | undefined;
+
+  /**
+   * Exact repo-relative config inputs consumed by resolution. Hash these even
+   * when absent, ignored, or above the source size limit, and check them before
+   * a clean-Git early return. Changed paths reach incrementalResolutionContext.
+   * Declare only inputs actually read by this provider; no glob expansion.
+   */
+  readonly resolutionContextFiles?: readonly string[];
+
   /** Entry-point function name patterns specific to this language.
    *  Merged with universal patterns at runtime for process detection scoring.
    *  Default: [] (only universal patterns apply). */

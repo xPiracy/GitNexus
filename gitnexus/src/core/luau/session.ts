@@ -7,13 +7,14 @@ import {
   StreamMessageReader,
   StreamMessageWriter,
 } from 'vscode-jsonrpc/node.js';
+import type { LuauLaunchConfiguration } from './configuration.js';
 
 export interface LuauRequireGraphOptions {
   projectPath: string;
   filePath: string;
   command: string;
   args: readonly string[];
-  workspaceConfiguration: { platform: { type: 'roblox' | 'standard' } };
+  workspaceConfiguration: LuauLaunchConfiguration['workspaceConfiguration'];
   initializationParams: Record<string, unknown>;
   currentFile?: boolean;
   timeoutMs?: number;

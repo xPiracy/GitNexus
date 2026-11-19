@@ -11,6 +11,7 @@ interface LuauGraphOptions {
   securityLevel?: string;
   definitions?: string;
   docs?: string;
+  sourcemap?: string;
   currentFile?: boolean;
   timeout?: string;
 }
@@ -53,19 +54,6 @@ export async function luauGraphCommand(file: string, options: LuauGraphOptions):
     if (!(await stat(filePath)).isFile() || !/\.(lua|luau)$/i.test(filePath)) {
       throw new Error('The seed must be a .luau or .lua file.');
     }
-    if ((options.platform ?? 'roblox') === 'roblox') {
-      // Without this mapping, script.Parent/game service requires can silently disappear.
-      const sourcemap = path.join(projectPath, 'sourcemap.json');
-      const info = await stat(sourcemap).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error;
-        return null;
-      });
-      if (!info?.isFile()) {
-        throw new Error(
-          'Roblox export requires sourcemap.json in the project root. Generate it with rojo sourcemap --include-non-scripts default.project.json --output sourcemap.json.',
-        );
-      }
-    }
     const configuration = await prepareLuauConfiguration({
       projectPath,
       serverPath: options.server,
@@ -73,6 +61,10 @@ export async function luauGraphCommand(file: string, options: LuauGraphOptions):
       securityLevel: options.securityLevel,
       definitionsPath: options.definitions,
       docsPath: options.docs,
+      // Preserve the default map while allowing the selected Rojo project's generated artifact.
+      sourcemapPath:
+        options.sourcemap ??
+        ((options.platform ?? 'roblox') === 'roblox' ? 'sourcemap.json' : undefined),
       signal: controller.signal,
     });
     const graph = await exportLuauRequireGraph({

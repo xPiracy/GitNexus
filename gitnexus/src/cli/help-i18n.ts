@@ -164,6 +164,7 @@ const OPTION_DESCRIPTION_KEYS = {
   'luau-graph|--project <path>': 'help.option.luauGraph.project',
   'luau-graph|--server <path>': 'help.option.luauGraph.server',
   'luau-graph|--platform <platform>': 'help.option.luauGraph.platform',
+  'luau-graph|--sourcemap <path>': 'help.option.luauGraph.sourcemap',
   'luau-graph|--security-level <level>': 'help.option.luauGraph.securityLevel',
   'luau-graph|--definitions <path>': 'help.option.luauGraph.definitions',
   'luau-graph|--docs <path>': 'help.option.luauGraph.docs',

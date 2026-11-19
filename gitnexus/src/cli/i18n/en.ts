@@ -411,6 +411,7 @@ export const en = {
   'help.option.luauGraph.project': 'Luau workspace directory (default: current directory)',
   'help.option.luauGraph.server': 'Installed luau-lsp executable (default: luau-lsp on PATH)',
   'help.option.luauGraph.platform': 'Luau platform: roblox or standard',
+  'help.option.luauGraph.sourcemap': 'Roblox sourcemap JSON (default: sourcemap.json in --project)',
   'help.option.luauGraph.securityLevel':
     'Roblox type security level (None, PluginSecurity, LocalUserSecurity, RobloxScriptSecurity)',
   'help.option.luauGraph.definitions':

@@ -447,6 +447,13 @@ export interface RepoMeta {
    */
   fileHashes?: Record<string, string>;
   /**
+   * Provider-declared resolution inputs, independent of source scan filters.
+   * Null records a missing optional file so creation/deletion invalidates the
+   * graph. A missing receipt is unknown. Kept separate from fileHashes because
+   * these inputs need not have File rows or belong to source coverage.
+   */
+  resolutionContextHashes?: Record<string, string | null>;
+  /**
    * Digest of the graph rows the index holds for each file, recorded only for
    * repositories with an incremental resolution group. A group member whose
    * new rows match its digest is not rewritten when a sibling changes. An

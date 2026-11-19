@@ -41,6 +41,9 @@ const CALLABLE_FLOW_PROVIDER_COVERAGE = {
   // Objective-C message sends are resolved by its ScopeResolver. The provider
   // does not emit callable-value-flow captures in this MVP.
   [SupportedLanguages.ObjectiveC]: 'not-applicable',
+  // Native Luau tests immutable assign/copy/pass/invoke flow and refusal to
+  // invent invocations for stored callbacks. Mutable flow remains unresolved.
+  [SupportedLanguages.Luau]: 'dedicated',
 } as const satisfies Record<SupportedLanguages, CallableFlowCoverage>;
 
 const PROVIDER_FLOW_CASES = [

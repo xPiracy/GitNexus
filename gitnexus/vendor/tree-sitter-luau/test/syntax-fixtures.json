@@ -1,0 +1,152 @@
+[
+  {
+    "name": "mixed_named_unnamed_function_type",
+    "source": "type Fn = (any, key: string) -> any\n",
+    "expected": "valid"
+  },
+  {
+    "name": "builtin_word_as_parameter_name",
+    "source": "type Fn = (buffer: any) -> ()\n",
+    "expected": "valid"
+  },
+  {
+    "name": "generic_function_type",
+    "source": "type Fn = <T>(T) -> T\n",
+    "expected": "valid"
+  },
+  {
+    "name": "generic_pack_function_type",
+    "source": "type Fn<A..., R...> = (A...) -> R...\n",
+    "expected": "valid"
+  },
+  {
+    "name": "generic_pack_vararg_annotation",
+    "source": "local function f<A...>(...: A...) return ... end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "typeof_as_nested_type",
+    "source": "type Record = { value: typeof(subject) }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "leading_union",
+    "source": "type Choice = | string | number\n",
+    "expected": "valid"
+  },
+  {
+    "name": "leading_intersection",
+    "source": "type Both = & { x: number } & { y: string }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "read_write_field_names",
+    "source": "type Record = { read: () -> (), write: (number) -> () }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "read_write_access_qualifiers",
+    "source": "type Record = { read value: number, write other: string }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "generic_pack_default",
+    "source": "type Fn<T = string, A... = (number)> = (T, A...) -> T\n",
+    "expected": "valid"
+  },
+  {
+    "name": "type_function",
+    "source": "type function identity(t) return t end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "const_variable",
+    "source": "const value: number = 1\n",
+    "expected": "valid"
+  },
+  {
+    "name": "const_function",
+    "source": "const function identity<T>(value: T): T return value end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "const_contextual_identifier",
+    "source": "local const = function() end; const()\n",
+    "expected": "valid"
+  },
+  {
+    "name": "contextual_identifier_members",
+    "source": "const.member(); const[1](); type(); export(); continue()\n",
+    "expected": "valid"
+  },
+  {
+    "name": "contextual_table_field_names",
+    "source": "local record = { type = type, const = const, export = export, continue = continue }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "native_attribute",
+    "source": "@native local function identity(value) return value end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "explicit_instantiation",
+    "source": "local specialized = identity<<number>>\n",
+    "expected": "valid"
+  },
+  {
+    "name": "method_explicit_instantiation",
+    "source": "object:method<<number>>()\n",
+    "expected": "valid"
+  },
+  {
+    "name": "boolean_table_keys",
+    "source": "local values = { [true] = 1, [false] = 2 }; local value = values[false]\n",
+    "expected": "valid"
+  },
+  {
+    "name": "function_table_key",
+    "source": "local values = { [function() end] = true }\n",
+    "expected": "valid"
+  },
+  {
+    "name": "if_expression_table_key",
+    "source": "local value = values[if flag then 1 else 2]\n",
+    "expected": "valid"
+  },
+  {
+    "name": "generic_pack_tail",
+    "source": "type F<T...> = () -> (boolean, T...)\n",
+    "expected": "valid"
+  },
+  {
+    "name": "empty_generic_application",
+    "source": "local value: Container<> = {}\n",
+    "expected": "valid"
+  },
+  {
+    "name": "keyword_prefix_identifier",
+    "source": "local local1 = 1; local function function2() return local1 end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "export_type_function",
+    "source": "export type function identity(t) return t end\n",
+    "expected": "valid"
+  },
+  {
+    "name": "export_value_syntax",
+    "source": "export const answer = 42\n",
+    "expected": "unsupported"
+  },
+  {
+    "name": "if_local_syntax",
+    "source": "if local value = getValue() then print(value) end\n",
+    "expected": "unsupported"
+  },
+  {
+    "name": "missing_end_negative",
+    "source": "local function broken()\n",
+    "expected": "invalid"
+  }
+]

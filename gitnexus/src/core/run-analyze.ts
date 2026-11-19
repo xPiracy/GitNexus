@@ -249,6 +249,11 @@ import { taintModelVersion } from './ingestion/taint/typescript-model.js';
 import { parseTruthyEnv, parsePositiveIntEnv } from './ingestion/utils/env.js';
 import { computeFileHashes, diffFileHashes } from '../storage/file-hash.js';
 import {
+  captureResolutionContextHashes,
+  diffResolutionContextHashes,
+  type ResolutionContextHashes,
+} from './incremental/resolution-context-hashes.js';
+import {
   extractChangedSubgraph,
   computeEffectiveWriteSet,
 } from './incremental/subgraph-extract.js';
@@ -2886,6 +2891,20 @@ async function runFullAnalysisInner(
   // frameworkAnnotations values, or Java/Kotlin Bean evidence) — the fingerprint
   // guard above would wave it through.
   const persistedFilePaths = Object.keys(existingMeta?.fileHashes ?? {});
+  // Git may report a clean checkout while an ignored resolution input changed.
+  // These exact provider-declared paths are outside source coverage by design.
+  let persistedContextChanged: boolean;
+  try {
+    persistedContextChanged =
+      diffResolutionContextHashes(
+        await captureResolutionContextHashes(repoPath, persistedFilePaths),
+        existingMeta?.resolutionContextHashes,
+      ).length > 0;
+  } catch {
+    // Unreadable inputs cannot certify reuse. Recheck against the fresh source
+    // scan below: the previous provider may have lost its last source file.
+    persistedContextChanged = true;
+  }
   const expectedPersistedAnalysisFeatures = resolveAnalysisFeatureVersions(
     ANALYSIS_FEATURES,
     persistedFilePaths,
@@ -3156,7 +3175,8 @@ async function runFullAnalysisInner(
     existingMeta.lastCommit === currentCommit &&
     !ftsModeChanged &&
     !processDetectionMismatch &&
-    !includeDotDirsChanged
+    !includeDotDirsChanged &&
+    !persistedContextChanged
   ) {
     // Non-git folders have currentCommit = '' — always rebuild since we can't detect changes
     if (currentCommit !== '') {
@@ -3716,19 +3736,21 @@ async function runFullAnalysisInner(
   // ── Phase 1: Full Pipeline (0–60%) ────────────────────────────────
   let pipelineResult;
   let inputFileHashes: Map<string, string> | undefined;
+  let resolutionContextHashes: ResolutionContextHashes;
   try {
+    // Capture before resolution, including newly represented providers. Context
+    // hashes remain separate: ignored/large configs have no indexed File row.
+    const inputs = await walkRepositoryPaths(repoPath, undefined, {
+      quiet: true,
+      onPathsDiscovered: async () => {},
+    });
+    const inputPaths = inputs.map((file) => file.path);
+    resolutionContextHashes = await captureResolutionContextHashes(repoPath, inputPaths);
     if (repoHasGit) {
       // Capture freshness before parsing. Hashing afterward can certify an edit
       // the graph never saw and let the dirty fast path preserve stale results.
       // A concurrent edit now differs from this receipt on the next analysis.
-      const inputs = await walkRepositoryPaths(repoPath, undefined, {
-        quiet: true,
-        onPathsDiscovered: async () => {},
-      });
-      inputFileHashes = await computeFileHashes(
-        repoPath,
-        inputs.map((file) => file.path),
-      );
+      inputFileHashes = await computeFileHashes(repoPath, inputPaths);
     }
     callbacks.signal?.throwIfAborted();
     const { runPipelineFromRepo } = await import('./ingestion/pipeline.js');
@@ -3894,6 +3916,10 @@ async function runFullAnalysisInner(
   const hashDiff = isIncremental
     ? diffFileHashes(newFileHashes, existingMeta!.fileHashes)
     : undefined;
+  const changedResolutionContexts = diffResolutionContextHashes(
+    resolutionContextHashes,
+    existingMeta?.resolutionContextHashes,
+  );
 
   // #3016: `skipDerivedGraphPhases` was decided BEFORE the pipeline, from the
   // persisted metadata alone, so it can only ever be a bet that this run stays
@@ -3912,6 +3938,7 @@ async function runFullAnalysisInner(
     isIncremental &&
     !!hashDiff &&
     shouldPreservePersistedDerivedGraph(hashDiff) &&
+    changedResolutionContexts.length === 0 &&
     !processDetectionMismatch;
   if (skipDerivedGraphPhases && !preserveDerivedLayer) {
     progress('communities', 58, 'Detecting code communities and flows...');
@@ -4260,7 +4287,7 @@ async function runFullAnalysisInner(
       // in the new graph differ from the rows recorded for it.
       const rewriteCandidates = new Set<string>();
       for (const filePath of collectResolutionGroupFiles(
-        [...hashDiff.toWrite, ...hashDiff.deleted],
+        [...hashDiff.toWrite, ...hashDiff.deleted, ...changedResolutionContexts],
         allFilePaths,
       )) {
         if (!writableFiles.has(filePath)) rewriteCandidates.add(filePath);
@@ -6194,6 +6221,8 @@ async function runFullAnalysisInner(
       // Embedding sync also needs snapshot identity for non-git checkouts.
       // Incremental DB eligibility still independently requires repoHasGit.
       fileHashes: newFileHashesRecord,
+      // Advance only with this successful graph, never during a freshness probe.
+      resolutionContextHashes,
       // Recorded only where a resolution group exists. A file's entry moves
       // to its new digest only when this run wrote that file's rows.
       fileRowDigests:
@@ -6348,6 +6377,11 @@ async function runFullAnalysisInner(
       const content = createHash('sha256');
       for (const entry of [...newFileHashes].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
         content.update(JSON.stringify(entry)).update('\0');
+      for (const entry of Object.entries(resolutionContextHashes).sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      )) {
+        content.update(JSON.stringify(['resolution-context', entry])).update('\0');
+      }
       const receipt = await prepareAnalysisPublication(
         metaDir,
         buildPath,

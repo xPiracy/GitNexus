@@ -9,7 +9,7 @@ const {
   StreamMessageWriter,
 } = require('vscode-jsonrpc/node');
 
-const [, , mode, projectPath] = process.argv;
+const [, , mode, projectPath, sourcemapFile] = process.argv;
 const connection = createMessageConnection(
   new StreamMessageReader(process.stdin),
   new StreamMessageWriter(process.stdout),
@@ -38,9 +38,13 @@ connection.onNotification('textDocument/didOpen', (params) => {
 });
 
 connection.onRequest('luau-lsp/requireGraph', async (params) => {
+  const expectedConfiguration = {
+    platform: { type: 'roblox' },
+    ...(sourcemapFile ? { sourcemap: { sourcemapFile } } : {}),
+  };
   assert.deepEqual(await configuration, [
-    { platform: { type: 'roblox' } },
-    { platform: { type: 'roblox' } },
+    expectedConfiguration,
+    expectedConfiguration,
   ]);
   assert.deepEqual(opened, {
     uri,

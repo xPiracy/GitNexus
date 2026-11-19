@@ -129,6 +129,11 @@ const SMOKE_CASES: Record<string, SmokeCase> = {
     snippet: 'pub fn main() void {}\n',
     rootType: 'source_file',
   },
+  [SupportedLanguages.Luau]: {
+    language: SupportedLanguages.Luau,
+    snippet: 'const function identity(value: number): number return value end\n',
+    rootType: 'chunk',
+  },
 };
 
 describe('parser-loader ABI load-smoke (#1922)', () => {

@@ -375,6 +375,8 @@ export const zhCN = {
   'help.option.luauGraph.project': 'Luau 工作区目录（默认：当前目录）',
   'help.option.luauGraph.server': '已安装的 luau-lsp 可执行文件（默认：PATH 中的 luau-lsp）',
   'help.option.luauGraph.platform': 'Luau 平台：roblox 或 standard',
+  'help.option.luauGraph.sourcemap':
+    'Roblox sourcemap JSON（默认：--project 目录中的 sourcemap.json）',
   'help.option.luauGraph.securityLevel':
     'Roblox 类型安全级别（None、PluginSecurity、LocalUserSecurity、RobloxScriptSecurity）',
   'help.option.luauGraph.definitions': '本地 Roblox 类型定义（默认：从官方来源下载并缓存）',

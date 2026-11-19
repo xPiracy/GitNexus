@@ -356,6 +356,7 @@ export const statusCommand = async (options: StatusOptions = {}) => {
           repo.repoPath,
           activeMeta.fileHashes,
           activeMeta.indexCoverage,
+          activeMeta.resolutionContextHashes,
         )
       : undefined;
 
