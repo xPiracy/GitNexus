@@ -29,11 +29,18 @@ import { isGitNexusManagedPath } from '../storage/gitnexus-managed-paths.js';
 import { chunk } from '../lib/utils.js';
 import { logger } from './logger.js';
 import type { RepoMeta } from '../storage/repo-meta.js';
+import {
+  captureResolutionContextHashes,
+  diffResolutionContextHashes,
+  type ResolutionContextHashes,
+} from './incremental/resolution-context-hashes.js';
 
 /** Why the recorded coverage set could not be compared against disk at all. */
 export type IndexContentUnmeasurableReason =
   /** Metadata predates per-file hashes, or the run recorded none (non-git). */
   | 'no-file-hashes'
+  /** A represented provider's consumed inputs predate config fingerprints. */
+  | 'no-resolution-context-hashes'
   /** The repository scan or hashing pass threw. */
   | 'scan-failed';
 
@@ -83,6 +90,7 @@ export const detectIndexContentDrift = async (
   repoPath: string,
   fileHashes: Readonly<Record<string, string>> | undefined,
   coverage?: IndexCoveragePolicy,
+  resolutionContextHashes?: ResolutionContextHashes,
 ): Promise<IndexContentDrift> => {
   if (!fileHashes || Object.keys(fileHashes).length === 0) {
     return { kind: 'unmeasurable', reason: 'no-file-hashes' };
@@ -160,12 +168,38 @@ export const detectIndexContentDrift = async (
       const currentHash = hashed.get(p) ?? recorded[p];
       if (currentHash !== recorded[p]) changed.push(p);
     }
-    changed.sort();
+    // Config bytes can affect graph edges while Git is clean and the source
+    // coverage set is unchanged. Reuse the analyzer's declarations, never read
+    // arbitrary paths from metadata, and keep unknown receipts distinct.
+    const contexts = await captureResolutionContextHashes(repoPath, scannedPaths);
+    let contextUnknown = false;
+    for (const relative of diffResolutionContextHashes(contexts, resolutionContextHashes)) {
+      if (
+        Object.hasOwn(contexts, relative) &&
+        !Object.hasOwn(resolutionContextHashes ?? {}, relative)
+      ) {
+        contextUnknown = true;
+      } else if (contexts[relative] === null || !Object.hasOwn(contexts, relative)) {
+        if (!deleted.includes(relative)) deleted.push(relative);
+      } else if (resolutionContextHashes?.[relative] === null) {
+        if (!added.includes(relative)) added.push(relative);
+      } else if (!changed.includes(relative)) changed.push(relative);
+    }
+    // A config admitted by the source scan can occur in both comparisons.
+    // Classify it once; a source addition/deletion takes precedence over edit.
+    const addedSet = new Set(added);
+    const deletedSet = new Set(deleted);
+    const changedOnly = changed
+      .filter((relative) => !addedSet.has(relative) && !deletedSet.has(relative))
+      .sort();
+    added.sort();
+    deleted.sort();
 
-    if (changed.length === 0 && added.length === 0 && deleted.length === 0) {
+    if (changedOnly.length === 0 && added.length === 0 && deleted.length === 0) {
+      if (contextUnknown) return { kind: 'unmeasurable', reason: 'no-resolution-context-hashes' };
       return { kind: 'current', coveredFileCount: scannedSet.size };
     }
-    return { kind: 'drifted', changed, added, deleted };
+    return { kind: 'drifted', changed: changedOnly, added, deleted };
   } catch (err) {
     logger.warn({ err, repoPath }, 'index content drift scan failed');
     return { kind: 'unmeasurable', reason: 'scan-failed' };

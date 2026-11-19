@@ -4,10 +4,11 @@
  *
  * The npm tarball ships a lean vendor/ allow-list (package.json `files`):
  * prebuilds, the bindings entry, node-types.json, and package metadata — not
- * generated parser.c. A grammar is "covered" on a platform-arch tuple if EITHER
+ * generated parser.c, except for explicit per-grammar source fallbacks.
+ * A grammar is "covered" on a platform-arch tuple if EITHER
  * a prebuild ships for it OR the grammar's full source-build set ships (so the
  * install can source-build it, toolchain permitting). Lean publish is safe ONLY
- * when every grammar has all six prebuilds; dropping source while any grammar
+ * when each source-free grammar has all six prebuilds; dropping source while any grammar
  * still lacks a prebuild would ship a grammar with NO loadable binding.
  *
  * HOW SOURCE INCLUSION IS DECIDED. The `files` allow-list OVERRIDES `.npmignore`
@@ -25,6 +26,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { globSync } = require('glob');
 
 const TUPLES = [
   'linux-x64',
@@ -35,14 +37,13 @@ const TUPLES = [
   'win32-arm64',
 ];
 
-// Source-build inputs (relative to vendor/<name>/) whose presence makes a grammar
-// source-buildable. Per-grammar we only require the ones that exist on disk (e.g.
-// tree-sitter-c has no external scanner.c).
+// Every Node grammar needs these inputs. Additional sources come from
+// binding.gyp and their local includes; absent files must not disappear from
+// the required set merely because somebody deleted them from the checkout.
 const SOURCE_BUILD_REL = [
   'binding.gyp',
   'bindings/node/binding.cc',
   'src/parser.c',
-  'src/scanner.c',
   'src/tree_sitter/parser.h',
 ];
 
@@ -50,8 +51,8 @@ const SOURCE_BUILD_REL = [
  * Does the package.json `files` allow-list ship the WHOLE vendor subtree (and
  * therefore the vendored grammar source)? A bare `vendor` (optionally with a
  * trailing slash or `/**`/`/*`) includes everything under vendor/. A lean publish
- * replaces that with non-source subpaths, so this returns false and grammars must
- * then rely on prebuilds.
+ * replaces that with narrower subpaths. A false result still permits complete
+ * per-grammar source allowlists, which collectGrammars checks independently.
  */
 function filesShipsVendorSource(filesField) {
   return filesEntries(filesField).includes('vendor');
@@ -125,15 +126,75 @@ function findPackedFilesProblems({ filesField, grammarNames }) {
   return problems;
 }
 
-/** The on-disk source-build inputs for a grammar (relative paths). */
+/** Required sources plus the transitive closure of their local C/C++ includes. */
 function sourceBuildSet(grammarDir) {
-  return SOURCE_BUILD_REL.filter((rel) => fs.existsSync(path.join(grammarDir, rel)));
+  const required = new Set(SOURCE_BUILD_REL);
+  const gyp = path.join(grammarDir, 'binding.gyp');
+  if (fs.existsSync(gyp)) {
+    // Gyp permits comments and commands, so it is not plain JSON. Only literal
+    // source paths are needed here; never evaluate its commands in a guard.
+    const contents = fs.readFileSync(gyp, 'utf8');
+    for (const match of contents.matchAll(/["']([^"'\n]+\.(?:c|cc|cpp|cxx|m|mm))["']/g)) {
+      required.add(match[1].replace(/\\/g, '/'));
+    }
+  }
+  const queue = [...required].filter((rel) => rel !== 'binding.gyp');
+  while (queue.length) {
+    const relative = queue.pop();
+    if (relative.startsWith('../') || path.isAbsolute(relative)) continue;
+    const file = path.join(grammarDir, relative);
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+    const contents = fs.readFileSync(file, 'utf8');
+    for (const match of contents.matchAll(/^\s*#\s*include\s+"([^"\n]+)"/gm)) {
+      const include = match[1].replace(/\\/g, '/');
+      const beside = path.posix.normalize(path.posix.join(path.posix.dirname(relative), include));
+      const underSrc = path.posix.normalize(path.posix.join('src', include));
+      const dependency = fs.existsSync(path.join(grammarDir, beside))
+        ? beside
+        : fs.existsSync(path.join(grammarDir, underSrc))
+          ? underSrc
+          : beside;
+      if (!required.has(dependency)) {
+        required.add(dependency);
+        queue.push(dependency);
+      }
+    }
+  }
+  return [...required].sort();
 }
 
-/** True when a grammar can be source-built from its vendored files (has gyp + parser). */
+/** All declared build inputs must exist, including scanner helper headers. */
 function isBuildableFromSource(grammarDir) {
-  const set = sourceBuildSet(grammarDir);
-  return set.includes('binding.gyp') && set.includes('src/parser.c');
+  return sourceBuildSet(grammarDir).every(
+    (rel) =>
+      !rel.startsWith('../') &&
+      !path.isAbsolute(rel) &&
+      fs.existsSync(path.join(grammarDir, rel)) &&
+      fs.statSync(path.join(grammarDir, rel)).isFile(),
+  );
+}
+
+/** Expand vendor allowlists once; directory entries also include descendants. */
+function packedVendorMatcher(filesField, packageRoot) {
+  const included = new Set();
+  const excluded = new Set();
+  for (const value of filesField || []) {
+    const entry = String(value).replace(/\\/g, '/');
+    const negative = entry.startsWith('!');
+    const pattern = negative ? entry.slice(1) : entry;
+    if (!/^vendor(?:\/|$)/.test(pattern)) continue;
+    const target = negative ? excluded : included;
+    for (const match of globSync(pattern, { cwd: packageRoot, dot: true })) {
+      target.add(match.replace(/\\/g, '/').replace(/\/+$/, ''));
+    }
+  }
+  const covers = (entries, relative) => {
+    for (let current = relative; current !== '.'; current = path.posix.dirname(current)) {
+      if (entries.has(current)) return true;
+    }
+    return false;
+  };
+  return (relative) => covers(included, relative) && !covers(excluded, relative);
 }
 
 /** Count platform-arch tuples with a committed prebuilt .node on disk. */
@@ -191,19 +252,28 @@ function findStrayBuildArtifacts(vendorDir) {
     .map((d) => `vendor/${d}/build`);
 }
 
-function collectGrammars(vendorDir, shipsVendorSource) {
+function collectGrammars(vendorDir, filesField) {
   if (!fs.existsSync(vendorDir)) return [];
+  const isPacked = packedVendorMatcher(filesField, path.dirname(vendorDir));
   return fs
     .readdirSync(vendorDir)
     .filter((d) => /^tree-sitter-/.test(d))
     .map((name) => {
       const dir = path.join(vendorDir, name);
+      const sourceInputs = sourceBuildSet(dir);
+      const missingSourceInputs = sourceInputs.filter(
+        (rel) =>
+          rel.startsWith('../') ||
+          path.isAbsolute(rel) ||
+          !fs.existsSync(path.join(dir, rel)) ||
+          !fs.statSync(path.join(dir, rel)).isFile() ||
+          !isPacked(`vendor/${name}/${rel}`),
+      );
       return {
         name,
         prebuilt: countPrebuiltTuples(dir),
-        // Source ships when `files` includes the vendor subtree AND the grammar
-        // actually carries a buildable source set on disk.
-        shipsSource: shipsVendorSource && isBuildableFromSource(dir),
+        shipsSource: missingSourceInputs.length === 0,
+        missingSourceInputs,
       };
     });
 }
@@ -212,9 +282,7 @@ function main() {
   const gitnexusRoot = path.join(__dirname, '..');
   const vendorDir = path.join(gitnexusRoot, 'vendor');
   const pkg = JSON.parse(fs.readFileSync(path.join(gitnexusRoot, 'package.json'), 'utf8'));
-  const shipsVendorSource = filesShipsVendorSource(pkg.files);
-
-  const grammars = collectGrammars(vendorDir, shipsVendorSource);
+  const grammars = collectGrammars(vendorDir, pkg.files);
   if (grammars.length === 0) {
     console.error(`[publish-guard] No vendored tree-sitter grammars found under ${vendorDir}.`);
     process.exit(1);

@@ -72,7 +72,7 @@ const CSharp = getLanguageGrammar(SupportedLanguages.CSharp);
 // `isLanguageAvailable` must re-introduce the gate here. (The cleaner end-state
 // — routing this table through `parser-loader.getLanguageGrammar` so there is
 // one loader — is the deferred Tier-1 consolidation.)
-// Swift/Dart/Kotlin/C/Zig are vendored grammars loaded from `vendor/` by absolute
+// Swift/Dart/Kotlin/Luau/C/Zig are vendored grammars loaded from `vendor/` by absolute
 // path (NEVER copied into node_modules — see vendored-grammars.ts / #2111). Each
 // may be absent on a platform without a prebuild or a toolchain-less /
 // `--ignore-scripts` install, so every load is guarded so a missing binding
@@ -90,6 +90,11 @@ try {
 let Kotlin: TreeSitterLanguage | null = null;
 try {
   Kotlin = requireVendoredGrammar('tree-sitter-kotlin') as TreeSitterLanguage;
+} catch {}
+
+let Luau: TreeSitterLanguage | null = null;
+try {
+  Luau = requireVendoredGrammar('tree-sitter-luau') as TreeSitterLanguage;
 } catch {}
 
 let C: TreeSitterLanguage | null = null;
@@ -643,6 +648,7 @@ const languageMap: Record<string, TreeSitterLanguage> = {
   [SupportedLanguages.Go]: Go,
   [SupportedLanguages.Rust]: Rust,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
+  ...(Luau ? { [SupportedLanguages.Luau]: Luau } : {}),
   [SupportedLanguages.PHP]: PHP.php_only,
   [SupportedLanguages.Ruby]: Ruby,
   [SupportedLanguages.Vue]: TypeScript.typescript,

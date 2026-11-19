@@ -279,4 +279,16 @@ export const GRAMMAR_SOURCES: Record<string, GrammarSource> = {
       '`gitnexus/vendor/tree-sitter-zig`) failed to load. ' +
       'Likely cause: no prebuilt `.node` for this platform/architecture.',
   },
+  [SupportedLanguages.Luau]: {
+    packageName: 'tree-sitter-luau',
+    load() {
+      return requireVendoredGrammar(this.packageName);
+    },
+    optional: true,
+    userSkippable: true,
+    unavailableNote:
+      'Luau parsing disabled: vendored `tree-sitter-luau` (under ' +
+      '`gitnexus/vendor/tree-sitter-luau`) failed to load. ' +
+      'Build the grammar for this platform or install a matching native prebuild.',
+  },
 };

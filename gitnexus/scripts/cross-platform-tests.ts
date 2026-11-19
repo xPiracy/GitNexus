@@ -311,6 +311,8 @@ const LBUG_NATIVE = [
 // process spawning, which behaves differently across platforms (shell
 // quoting, path resolution, signal handling)
 const SPAWN_CLI = [
+  'test/unit/luau-session.test.ts',
+  'test/unit/luau-graph-command.test.ts',
   'test/integration/resolvers/java-javac-overloads.test.ts',
   // Real shard/blob/JSON roundtrip: path identities and child invocation vary by OS.
   'test/unit/shard-timings-roundtrip.test.ts',
@@ -427,6 +429,7 @@ const NATIVE_ADDON_SMOKE = [
 // Filesystem behavior tests — exercise operations that vary across
 // platforms (CRLF, symlinks, permissions, temp dirs)
 const FILESYSTEM = [
+  'test/unit/luau-configuration.test.ts',
   // The deletion-guard cases in this file require real Windows path semantics.
   'test/unit/canonicalize-path-long-path-prefix.test.ts',
   'test/unit/storage-resolver.test.ts',

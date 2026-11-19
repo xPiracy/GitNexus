@@ -4,7 +4,7 @@
  * One registry-driven script replaces the former per-grammar
  * build-tree-sitter-<name>.cjs files (they were ~95% identical).
  *
- * The grammars (tree-sitter-c/objc/dart/proto/swift/kotlin/zig) are loaded from
+ * The grammars (tree-sitter-c/objc/dart/proto/swift/kotlin/zig/luau) are loaded from
  * `vendor/<name>/` by absolute path at runtime (see
  * src/core/tree-sitter/vendored-grammars.ts) and are NEVER copied into
  * node_modules — an undeclared package under node_modules is "extraneous" to
@@ -15,8 +15,8 @@
  *   1. If the vendored source is absent (no binding.gyp) or the binding is
  *      already built, do nothing.
  *   2. Prefer a committed prebuild for this platform-arch (toolchain-free) via
- *      node-gyp-build — `vendor/<name>/prebuilds/` ships all six tuples, so on a
- *      supported platform this returns immediately and writes nothing.
+ *      node-gyp-build. A matching prebuild returns immediately and writes
+ *      nothing; source fallback covers grammars with a partial platform set.
  *   3. Otherwise source-build from the vendored grammar source (binding.gyp +
  *      src/) into `vendor/<name>/build/` (gitignored) so parsing still works on
  *      a toolchain host that lacks a matching prebuild.
@@ -46,6 +46,7 @@ const GRAMMARS = {
   swift: { required: false, display: 'Swift', ext: '.swift' },
   kotlin: { required: false, display: 'Kotlin', ext: '.kt/.kts' },
   zig: { required: false, display: 'Zig', ext: '.zig' },
+  luau: { required: false, display: 'Luau', ext: '.luau/.lua' },
 };
 
 const skipOptional = process.env.GITNEXUS_SKIP_OPTIONAL_GRAMMARS === '1';

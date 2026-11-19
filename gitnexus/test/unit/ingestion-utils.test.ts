@@ -155,8 +155,15 @@ describe('getLanguageFromFilename', () => {
     });
   });
 
+  describe('Luau', () => {
+    it.each(['.luau', '.lua'])('detects and routes %s files', (ext) => {
+      expect(getLanguageFromFilename(`module${ext}`)).toBe(SupportedLanguages.Luau);
+      expect(getProviderForFile(`src/module${ext}`)?.id).toBe(SupportedLanguages.Luau);
+    });
+  });
+
   describe('unsupported', () => {
-    it.each(['.scala', '.r', '.lua', '.txt', '.md', '.json', '.yaml'])(
+    it.each(['.scala', '.r', '.txt', '.md', '.json', '.yaml'])(
       'returns null for %s files',
       (ext) => {
         expect(getLanguageFromFilename(`file${ext}`)).toBeNull();

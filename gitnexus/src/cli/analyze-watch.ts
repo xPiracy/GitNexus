@@ -2,9 +2,11 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { getHeapStatistics } from 'node:v8';
-import { watchFile, unwatchFile } from 'node:fs';
+import { watchFile, unwatchFile, type Stats } from 'node:fs';
 import { watch, type FSWatcher } from 'chokidar';
 import { createWatchIgnorePredicate } from '../config/ignore-service.js';
+import { walkRepositoryPaths } from '../core/ingestion/filesystem-walker.js';
+import { collectResolutionContextPaths } from '../core/incremental/resolution-context-hashes.js';
 import {
   analyzeFailureMayHaveMutatedLiveIndex,
   runFullAnalysis,
@@ -321,6 +323,7 @@ export async function startWatchFileLoop(
   let ignoreControlValid = true;
   let rearmPending = false;
   let closed = false;
+  const contextPollers = new Map<string, () => void>();
   const queue = new WatchRefreshQueue(
     async (paths) => {
       if (paths.some(isIgnoreControlPath) || !ignoreControlValid) {
@@ -348,7 +351,17 @@ export async function startWatchFileLoop(
       // arming is still picked up by this refresh, and a write that lands
       // afterwards is reported by the armed watcher.
       if (rearmPending) await rearmWatcher();
+      await updateContextPollers();
       await refresh(paths);
+      // Reloaded options can admit a provider only inside refresh (for example
+      // a larger source-size cap). Arm its inputs, then catch up once so an edit
+      // between resolution and arming cannot leave an unwatched stale graph.
+      if (
+        (paths.length === 0 || paths.some(isConfigControlPath)) &&
+        (await updateContextPollers())
+      ) {
+        queue.enqueue(WATCH_FULL_REFRESH_PATH);
+      }
     },
     onError,
     debounceMs,
@@ -356,7 +369,10 @@ export async function startWatchFileLoop(
       maxWaitMs: Math.max(2_000, debounceMs * 10),
       maxPendingPaths: 1_000,
       holdEventsUntilInitialRefresh: true,
-      isPriorityPath: (filePath) => isIgnoreControlPath(filePath) || isConfigControlPath(filePath),
+      isPriorityPath: (filePath) =>
+        isIgnoreControlPath(filePath) ||
+        isConfigControlPath(filePath) ||
+        contextPollers.has(filePath),
     },
   );
 
@@ -413,6 +429,45 @@ export async function startWatchFileLoop(
     queue.enqueue(EXTERNAL_CONFIG_WATCH_PATH);
   };
 
+  const closeContextPollers = () => {
+    for (const stop of contextPollers.values()) stop();
+    contextPollers.clear();
+  };
+
+  // Poll only exact inputs consumed by represented providers. These may be
+  // ignored, absent, oversized, or symlinked; the source watcher cannot cover
+  // all four. Refresh the finite set before analysis so a newly added language
+  // is covered before its resolver reads config, and remove unused pollers.
+  const updateContextPollers = async () => {
+    const sources = await walkRepositoryPaths(repoPath, undefined, {
+      quiet: true,
+      onPathsDiscovered: async () => {},
+    });
+    if (closed) return false;
+    const declared = new Set(collectResolutionContextPaths(sources.map((file) => file.path)));
+    let added = false;
+    for (const [relative, stop] of contextPollers) {
+      if (!declared.has(relative)) {
+        stop();
+        contextPollers.delete(relative);
+      }
+    }
+    for (const relative of declared) {
+      if (contextPollers.has(relative)) continue;
+      const absolute = path.resolve(repoPath, relative);
+      const changed = (current: Stats, previous: Stats) => {
+        // watchFile initially reports two empty stats for a missing path.
+        // That is an observed absence, not a change requiring another refresh.
+        if (closed || (current.nlink === 0 && previous.nlink === 0)) return;
+        queue.enqueue(relative);
+      };
+      watchFile(absolute, { interval: 100 }, changed);
+      contextPollers.set(relative, () => unwatchFile(absolute, changed));
+      added = true;
+    }
+    return added;
+  };
+
   // Chokidar emits `ready` once per instance and `add()` returns before the
   // rescan it starts has finished, with no signal for that completion. A file
   // an ignore-rule reload has just unignored is therefore still unregistered
@@ -452,6 +507,7 @@ export async function startWatchFileLoop(
     await queue.runInitial();
   } catch (error) {
     closed = true;
+    closeContextPollers();
     await watcher.close();
     if (configPath) unwatchFile(configPath, configChanged);
     await queue.close();
@@ -462,6 +518,7 @@ export async function startWatchFileLoop(
     waitForIdle: () => queue.waitForIdle(),
     close: async () => {
       closed = true;
+      closeContextPollers();
       await watcher.close();
       if (configPath) unwatchFile(configPath, configChanged);
       await queue.close();

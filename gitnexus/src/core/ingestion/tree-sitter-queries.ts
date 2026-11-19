@@ -3093,4 +3093,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Vue]: TYPESCRIPT_QUERIES, // Vue <script> blocks are parsed as TypeScript
   [SupportedLanguages.Cobol]: '', // Standalone regex processor — no tree-sitter queries
   [SupportedLanguages.Zig]: ZIG_QUERIES,
+  // A root marker engages native workers; the provider's AST hook emits declarations.
+  [SupportedLanguages.Luau]: '((chunk) @luau.root)',
 };

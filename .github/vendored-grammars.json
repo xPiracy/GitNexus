@@ -26,6 +26,13 @@
         "github": "fwcd/tree-sitter-kotlin"
       }
     },
+    "luau": {
+      "name": "tree-sitter-luau",
+      "upstream": {
+        "github": "polychromatist/tree-sitter-luau"
+      },
+      "hold": "Carries a maintained grammar/scanner patch at 71b03e66. Rebase patches/gitnexus.patch and pass syntax, scanner, coordinate, and official-parser parity gates before replacing generated sources; see gitnexus/vendor/tree-sitter-luau/README.md."
+    },
     "dart": {
       "name": "tree-sitter-dart",
       "upstream": {

@@ -74,11 +74,12 @@ describe('COMPATIBLE_ABI gate', () => {
 });
 
 describe('GRAMMARS registry', () => {
-  it('covers all seven vendored grammars, including Objective-C and Zig', () => {
+  it('covers all vendored grammars, including the maintained Luau fork', () => {
     expect(Object.keys(mod.GRAMMARS).sort()).toEqual([
       'c',
       'dart',
       'kotlin',
+      'luau',
       'objc',
       'proto',
       'swift',
@@ -89,11 +90,12 @@ describe('GRAMMARS registry', () => {
     expect(mod.GRAMMARS.zig.github).toBe('tree-sitter-grammars/tree-sitter-zig');
   });
 
-  it('holds Swift recovery regressions and tracks upstream source for the other vendors', () => {
+  it('holds patched grammars and tracks upstream source for the other vendors', () => {
     expect(mod.GRAMMARS.c.github).toBe('tree-sitter/tree-sitter-c');
     expect(mod.GRAMMARS.objc.github).toBe('tree-sitter-grammars/tree-sitter-objc');
     expect(mod.GRAMMARS.kotlin.github).toBe('fwcd/tree-sitter-kotlin');
     expect(mod.GRAMMARS.swift.hold).toContain('declaration-ownership');
+    expect(mod.GRAMMARS.luau.github).toBe('polychromatist/tree-sitter-luau');
     for (const k of ['c', 'objc', 'kotlin', 'dart', 'proto', 'zig']) {
       expect(mod.GRAMMARS[k].hold).toBeUndefined();
     }
@@ -331,9 +333,12 @@ describe('apply() error branches throw ApplyExit (CLI maps to exit codes)', () =
     expect(codeOf(() => mod.apply('nope', { deps: {} }))).toBe(2);
   });
 
-  it('held grammar (swift) → exit code 3 (short-circuits before the newer check)', () => {
-    expect(codeOf(() => mod.apply('swift', { deps: {} }))).toBe(3);
-  });
+  it.each(['swift', 'luau'])(
+    'held grammar %s → exit code 3 before any upstream fetch',
+    (grammar) => {
+      expect(codeOf(() => mod.apply(grammar, { deps: {} }))).toBe(3);
+    },
+  );
 
   it('ABI-incompatible candidate (16) → exit code 3', () => {
     const code = codeOf(() =>

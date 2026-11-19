@@ -42,6 +42,7 @@ describe('parser-loader GITNEXUS_SKIP_OPTIONAL_GRAMMARS runtime gate', () => {
     // Zig is a vendored optional grammar: the documented opt-out must cover
     // it too (`optional-grammars.ts` lists it among the skippable grammars).
     expect(isLanguageAvailable(SupportedLanguages.Zig)).toBe(false);
+    expect(isLanguageAvailable(SupportedLanguages.Luau)).toBe(false);
   });
 
   it('a comma list can name zig on its own', async () => {
@@ -51,6 +52,13 @@ describe('parser-loader GITNEXUS_SKIP_OPTIONAL_GRAMMARS runtime gate', () => {
     expect(isGrammarRuntimeSkipped(SupportedLanguages.Swift)).toBe(false);
   });
 
+  it.each(['luau', 'tree-sitter-luau'])('accepts the Luau opt-out spelling %s', async (value) => {
+    const { isLanguageAvailable, isGrammarRuntimeSkipped } = await freshLoader(value);
+    expect(isLanguageAvailable(SupportedLanguages.Luau)).toBe(false);
+    expect(isGrammarRuntimeSkipped(SupportedLanguages.Luau)).toBe(true);
+    expect(isGrammarRuntimeSkipped(SupportedLanguages.Zig)).toBe(false);
+  });
+
   it('skip=all/true/* also skip every optional grammar', async () => {
     for (const v of ['all', 'true', '*']) {
       const { isLanguageAvailable } = await freshLoader(v);
@@ -58,6 +66,7 @@ describe('parser-loader GITNEXUS_SKIP_OPTIONAL_GRAMMARS runtime gate', () => {
       expect(isLanguageAvailable(SupportedLanguages.Dart), `value=${v}`).toBe(false);
       expect(isLanguageAvailable(SupportedLanguages.Kotlin), `value=${v}`).toBe(false);
       expect(isLanguageAvailable(SupportedLanguages.Zig), `value=${v}`).toBe(false);
+      expect(isLanguageAvailable(SupportedLanguages.Luau), `value=${v}`).toBe(false);
     }
   });
 

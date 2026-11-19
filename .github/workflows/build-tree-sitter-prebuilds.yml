@@ -7,7 +7,7 @@ name: Build tree-sitter prebuilds
 #
 # Grammars covered here (the at-risk set — everything else already ships 6
 # upstream prebuilds AND stays dependency-review-tracked, so it is left alone).
-# All seven are vendored under gitnexus/vendor/; `kind` (below) only picks where
+# All listed grammars are vendored under gitnexus/vendor/; `kind` picks where
 # the build job fetches the C source to compile:
 #   - tree-sitter-c      (vendored source from upstream Git, including releases
 #                         newer than npm; REQUIRED grammar)
@@ -16,6 +16,8 @@ name: Build tree-sitter prebuilds
 #   - tree-sitter-kotlin (vendored source; built from gitnexus/vendor/ — pinned to
 #                         an unreleased main commit for `fun interface` support
 #                         (#169) that no npm release carries yet)
+#   - tree-sitter-luau   (vendored patched source; syntax/scanner tests run on
+#                         each platform before a prebuild is accepted)
 #   - tree-sitter-objc   (vendored source; built from gitnexus/vendor/ — pinned
 #                         for the Objective-C provider MVP)
 #   - tree-sitter-swift  (vendored source; built from gitnexus/vendor/ — its
@@ -25,13 +27,13 @@ name: Build tree-sitter prebuilds
 #                         off npm optionalDependency so `npm i -g gitnexus`
 #                         no longer warns on peerOptional tree-sitter@^0.22.1.
 #                         Upstream linux-arm64 prebuild is a mispackaged
-#                         x86-64 binary; this workflow rebuilds all seven.)
+#                         x86-64 binary; this workflow rebuilds every target.)
 #
 # Output: gitnexus/vendor/<grammar>/prebuilds/<platform-arch>/<grammar>.node for
 # all 6 targets ({linux,darwin,win32}-{x64,arm64}). tree-sitter grammars are
 # N-API, so one ABI-stable .node per platform-arch works across all Node majors.
 #
-# COST DISCIPLINE — this is a HEAVY native matrix (up to 7 grammars x 6 runners,
+# COST DISCIPLINE — this is a HEAVY native matrix (up to 8 grammars x 6 runners,
 # incl. macOS + arm64). It is DELIBERATELY NOT wired into normal PR/push CI. It
 # runs only:
 #   1. on manual dispatch (workflow_dispatch); or
@@ -62,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       grammars:
-        description: 'Comma-separated grammar shortnames to build (c,dart,proto,kotlin,objc,swift,zig), or "all".'
+        description: 'Comma-separated grammar shortnames to build (c,dart,proto,kotlin,luau,objc,swift,zig), or "all".'
         required: false
         type: string
         default: 'all'
@@ -94,7 +96,7 @@ on:
       - '!gitnexus/vendor/tree-sitter-*/prebuilds/**'
       # Self-test: re-run the guard if a future grammar pin is reintroduced in
       # the main package.json (optionalDependencies fallback). No-op otherwise —
-      # all seven grammars are now fully vendored (including kotlin, objc, and zig).
+      # every covered grammar is vendored, including the maintained Luau patch.
       - 'gitnexus/package.json'
       # Self-test: re-run the guard (normally a no-op) when the recipe changes.
       - '.github/workflows/build-tree-sitter-prebuilds.yml'
@@ -164,6 +166,7 @@ jobs:
             // unreleased main commit for `fun interface` support (#169) that no
             // npm release carries yet — so it must build from the vendored source.
             kotlin: { name: 'tree-sitter-kotlin', kind: 'vendored' },
+            luau:   { name: 'tree-sitter-luau',   kind: 'vendored' },
             // Objective-C is vendored WITH its source and its native bindings
             // must be recut together with the pinned grammar snapshot.
             objc:   { name: 'tree-sitter-objc',   kind: 'vendored' },
@@ -506,6 +509,7 @@ jobs:
               dart:   "void main() { print(\"hi\"); }",
               proto:  "syntax = \"proto3\";\nmessage M { int32 id = 1; }",
               kotlin: "fun main() { println(\"hi\") }",
+              luau:   "export type F<A...> = (A...) -> (); const function f<A...>(...: A...) return ... end; local t = { [false] = function() end }; t[false]()",
               objc:   "@interface GNValidationProbe : NSObject\n@end",
               swift:  "func greet() { print(\"hi\") }",
               zig:    "pub fn main() void {}",
@@ -521,6 +525,17 @@ jobs:
             }
             console.log("OK", process.env.GRAMMAR, process.platform + "-" + process.arch, tree.rootNode.type);
           '
+
+          # Exercise Luau's scanner and UTF-16 contracts with this target's new
+          # binary. The probe already owns the exact runtime and loader deps.
+          if [ "$GRAMMAR" = "luau" ]; then
+            cp -R "$GITHUB_WORKSPACE/gitnexus/vendor/$NAME" "$probe/grammar"
+            rm -rf "$probe/grammar/prebuilds" "$probe/grammar/build"
+            mkdir -p "$probe/grammar/prebuilds/$PLATFORM_ARCH"
+            cp "$RUNNER_TEMP/stage/$GRAMMAR/$PLATFORM_ARCH/$NAME.node" \
+               "$probe/grammar/prebuilds/$PLATFORM_ARCH/$NAME.node"
+            node --test "$probe/grammar/test/syntax.test.cjs"
+          fi
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

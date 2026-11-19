@@ -237,6 +237,8 @@ export const zhCN = {
   'help.command.cypher.description': '对知识图谱执行原始 Cypher 查询',
   'help.command.detectChanges.description': '将 git diff hunk 映射到已索引符号和受影响执行流程',
   'help.command.check.description': '对已索引图谱运行结构检查',
+  'help.command.luauGraph.description':
+    '以 DOT 格式导出 Luau 工作区的模块图（实验功能，不更新索引）',
   'help.command.evalServer.description': '启动轻量 HTTP 服务器，用于评测期间的快速工具调用',
   'help.command.group.description': '管理仓库组，用于跨索引影响分析',
   'help.command.group.create.description': '使用模板 group.yaml 创建新仓库组',
@@ -370,6 +372,17 @@ export const zhCN = {
   'help.option.detectChanges.limit': '最多返回的已变更符号数',
   'help.option.cypher.limit': '最多返回的结果行数',
   'help.option.check.cycles': '检测循环导入，并在发现循环时失败',
+  'help.option.luauGraph.project': 'Luau 工作区目录（默认：当前目录）',
+  'help.option.luauGraph.server': '已安装的 luau-lsp 可执行文件（默认：PATH 中的 luau-lsp）',
+  'help.option.luauGraph.platform': 'Luau 平台：roblox 或 standard',
+  'help.option.luauGraph.sourcemap':
+    'Roblox sourcemap JSON（默认：--project 目录中的 sourcemap.json）',
+  'help.option.luauGraph.securityLevel':
+    'Roblox 类型安全级别（None、PluginSecurity、LocalUserSecurity、RobloxScriptSecurity）',
+  'help.option.luauGraph.definitions': '本地 Roblox 类型定义（默认：从官方来源下载并缓存）',
+  'help.option.luauGraph.docs': '本地 JSON 格式的 API 文档（默认：从官方来源下载并缓存）',
+  'help.option.luauGraph.currentFile': '仅导出起始文件的依赖图',
+  'help.option.luauGraph.timeout': 'LSP 导出超时时间（秒）',
   'help.option.evalServer.host':
     '绑定地址或可解析的主机名（默认：127.0.0.1；非回环绑定需要 GITNEXUS_AUTH_TOKEN；主机名解析为 IPv4）',
   'help.option.evalServer.idleTimeout': '空闲 N 秒后自动关闭（0 = 禁用）',

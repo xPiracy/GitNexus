@@ -256,6 +256,8 @@ export const en = {
   'help.command.detectChanges.description':
     'Map git diff hunks to indexed symbols and affected execution flows',
   'help.command.check.description': 'Run structural checks against the indexed graph',
+  'help.command.luauGraph.description':
+    'Export a Luau workspace module graph as DOT (experimental; does not update the index)',
   'help.command.evalServer.description':
     'Start lightweight HTTP server for fast tool calls during evaluation',
   'help.command.group.description': 'Manage repository groups for cross-index impact analysis',
@@ -406,6 +408,17 @@ export const en = {
   'help.option.detectChanges.limit': 'Max changed symbols to return',
   'help.option.cypher.limit': 'Max result rows to return',
   'help.option.check.cycles': 'Detect circular imports and fail when any are found',
+  'help.option.luauGraph.project': 'Luau workspace directory (default: current directory)',
+  'help.option.luauGraph.server': 'Installed luau-lsp executable (default: luau-lsp on PATH)',
+  'help.option.luauGraph.platform': 'Luau platform: roblox or standard',
+  'help.option.luauGraph.sourcemap': 'Roblox sourcemap JSON (default: sourcemap.json in --project)',
+  'help.option.luauGraph.securityLevel':
+    'Roblox type security level (None, PluginSecurity, LocalUserSecurity, RobloxScriptSecurity)',
+  'help.option.luauGraph.definitions':
+    'Local Roblox type definitions (default: cached official download)',
+  'help.option.luauGraph.docs': 'Local API documentation JSON (default: cached official download)',
+  'help.option.luauGraph.currentFile': 'Export only the seed file dependency graph',
+  'help.option.luauGraph.timeout': 'Maximum LSP export time in seconds',
   'help.option.evalServer.host':
     'Bind address or resolvable hostname (default: 127.0.0.1; non-loopback requires GITNEXUS_AUTH_TOKEN; hostnames resolve to IPv4)',
   'help.option.evalServer.idleTimeout': 'Auto-shutdown after N seconds idle (0 = disabled)',

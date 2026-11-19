@@ -1,0 +1,179 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -93,15 +93,17 @@
+     $._hex_byte_escape_sequence
+   ],
+ 
+-  inline: $ => [$.prefix, $.fieldsep],
++  inline: $ => [$.prefix, $.fieldsep, $._contextual_name],
+ 
+   supertypes: $ => [$.prefixexp, $.exp, $.statement, $.type],
+   
+   conflicts: $ => [
++    [$.continue_stmt, $.var],
+     [$._fntype_param, $.typelist             ],
+     [$._fntype_param,              $.wraptype],
+     [$._fntype_param, $.typelist,  $.wraptype],
+-    [$._typelist_vrd, $._typepack_vrd]],
++    [$._typelist_vrd, $._typepack_vrd],
++    [$._typelist_vrd, $._typepack_gen]],
+ 
+   word: $ => $.name,
+   rules: {
+@@ -146,7 +148,7 @@
+ 
+     local_fn_stmt: $ => seq(
+       optional($._attrlist),
+-      "local",
++      choice("local", "const"),
+       "function",
+       field("function_name", $.name),
+       $._fn_body
+@@ -262,7 +264,7 @@
+     continue_stmt: () => "continue",
+ 
+     local_var_stmt: $ => seq(
+-      "local",
++      choice("local", "const"),
+       $.bindinglist,
+       optional(seq(
+         field("assign_symbol", "="),
+@@ -439,7 +441,7 @@
+     field: $ => seq(
+       optional(seq(
+         choice(
+-          field("field_name", $.name),
++          field("field_name", $._contextual_name),
+           seq(
+             "[",
+             field("field_indexer", $.exp),
+@@ -481,7 +483,8 @@
+       $.arglist),
+     _tbl_method: $ => seq(
+       field("method_table", $.prefixexp),
+-      $._method_name
++      $._method_name,
++      optional($._type_instantiator)
+     ),
+     _method_name: $ => seq(
+       ":",
+@@ -508,12 +511,20 @@
+     bindinglist: $ => _list_strict($.binding, ","),
+ 
+     var: $ => choice(
+-      field("variable_name", $.name),
++      field("variable_name", $._contextual_name),
+       $._tbl_seq
++    ),
++    // Contextual statement words remain identifiers in calls and assignments.
++    _contextual_name: $ => choice(
++      $.name,
++      alias("const", $.name),
++      alias("type", $.name),
++      alias("export", $.name),
++      alias("continue", $.name)
+     ),
+     _tbl_seq: $ => seq(
+       choice(
+-        field("table_name", $.name),
++        field("table_name", $._contextual_name),
+         $._tbl_seq,
+         $.type_instantiator,
+         $.call_stmt,
+@@ -577,7 +588,7 @@
+       $.vararg,
+       optional(seq(
+         ":",
+-        field("type_specifier", $._outertype)
++        field("type_specifier", choice($._outertype, $.genpack))
+       ))
+     ),
+ 
+@@ -604,13 +615,13 @@
+         "."
+       )),
+       field("type_name", $.name),
+-      optional(seq("<", $._typeparamlist, ">"))
++      optional(seq("<", optional($._typeparamlist), ">"))
+     )),
+ 
+     typelist: $ => prec.dynamic(1,
+       _list_vrd($._outertype, $._typelist_vrd, ",")
+     ),
+-    _typelist_vrd: $ => prec.dynamic(1, $.variadic),
++    _typelist_vrd: $ => prec.dynamic(1, choice($.variadic, $.genpack)),
+ 
+     wraptype: $ => prec.dynamic(1, seq("(", $._outertype, ")")),
+ 
+@@ -684,7 +695,7 @@
+     ),
+     proptype: $ => seq(
+       optional(field("access_qualifier", $._readwrite)),
+-      field("field_name", $.name),
++      field("field_name", choice($.name, alias($.read, $.name), alias($.write, $.name))),
+       ":",
+       field("type_specifier", $._outertype)
+     ),
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -215,8 +215,9 @@
+ 
+     state->started = buffer[0];
+     state->stashed = buffer[1];
+-    state->depth = (buffer[2] << 8) | buffer[3];
+-    state->idepth = (buffer[4] << 8) | buffer[5];
++    // Serialized bytes are unsigned; plain char is signed on some targets.
++    state->depth = ((uint8_t)buffer[2] << 8) | (uint8_t)buffer[3];
++    state->idepth = ((uint8_t)buffer[4] << 8) | (uint8_t)buffer[5];
+     state->implicit_escape = buffer[6];
+   }
+ }
+@@ -427,14 +428,24 @@
+   size_t name_capacity = INITIAL_NAME_CAPACITY;
+   size_t name_size = 0;
+   char *name = ts_calloc(name_capacity, sizeof(char));
++  if (name == NULL)
++    return false;
+ 
+   lexer->mark_end(lexer);
+   while (!lexer->eof(lexer) &&
+-         !is_invalid_luau_name_character(lexer->lookahead)) {
++         (!is_invalid_luau_name_character(lexer->lookahead) ||
++          (lexer->lookahead >= '0' && lexer->lookahead <= '9'))) {
+     if (name_size + 1 == name_capacity) {
+-      name_capacity = name_capacity << 1;
+-      ts_realloc(name, name_capacity * sizeof(char));
+-      memset(name + name_size, 0, name_size * sizeof(char));
++      // realloc may move the allocation; keep the returned pointer and retain
++      // the original allocation until failure has been checked.
++      size_t next_capacity = name_capacity << 1;
++      char *next_name = ts_realloc(name, next_capacity * sizeof(char));
++      if (next_name == NULL) {
++        ts_free(name);
++        return false;
++      }
++      name = next_name;
++      name_capacity = next_capacity;
+     }
+     name[name_size++] = (char)lexer->lookahead;
+     // printf("size: %zu; capacity: %zu; char: %d\n", name_size,
+@@ -688,7 +699,7 @@
+     // pointer is changed from process_tstring to process_string without any
+     // rollback. i haven't investigated the details, but it caused an error on
+     // tick strings in the file previewer.
+-    static bool (*string_processor)(struct ScannerState *, struct TSLexer *,
++    bool (*string_processor)(struct ScannerState *, struct TSLexer *,
+                                     const bool *, const char);
+ 
+     if (state->started != TICK_STRING) {
+@@ -774,6 +785,10 @@
+           state->depth = possible_depth;
+           enter = true;
+         }
++        // A single '[' belongs to the grammar. Returning false rewinds the
++        // speculative long-string probe before keywords such as false/if.
++        if (!enter)
++          return false;
+       }
+ 
+       if (enter) {

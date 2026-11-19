@@ -71,6 +71,7 @@ const LANGUAGE_FIXTURES: Record<SupportedLanguages, [string, string]> = {
   swift: ['swift', 'func twice(_ x: Int) -> Int { return x + x }'],
   dart: ['dart', 'int twice(int x) { return x + x; }'],
   zig: ['zig', 'fn twice(x: i32) i32 { return x + x; }'],
+  luau: ['luau', 'local function twice(x: number): number return x + x end'],
   'objective-c': [
     'm',
     '@interface Sample\n- (int)twice:(int)x;\n@end\n@implementation Sample\n- (int)twice:(int)x { return x + x; }\n@end',

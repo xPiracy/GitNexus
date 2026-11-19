@@ -14,16 +14,17 @@ vendor/**/node_modules
 vendor/**/build
 
 # ── Lean publish (done via package.json `files`, not this file) ───────────────
-# Every vendored grammar now has 6/6 prebuilds, so the published tarball drops
-# generated source (parser.c etc.). node-gyp-build loads prebuilds without it.
+# Grammars with 6/6 prebuilds omit generated source (parser.c etc.). Luau keeps
+# an explicit source-build allowlist until its other platform prebuilds are
+# built and validated. Source fallback still requires a local compiler.
 #
 # IMPORTANT: this CANNOT be done from this file. A broad `files: ["vendor"]`
 # allow-list OVERRIDES .npmignore for the vendor/ subtree (verified: an active
 # `vendor/**/src/parser.c` line here does NOT exclude it from `npm pack`). The
-# lever is the `files` field — non-source subpaths only (vendor/**/prebuilds/**,
+# lever is the `files` field — shared runtime subpaths (vendor/**/prebuilds/**,
 # vendor/**/bindings/node/index.js, vendor/**/src/node-types.json,
 # vendor/**/package.json, vendor/**/LICENSE, vendor/**/README.md, plus Leiden
-# and the FTS manifest).
+# and the FTS manifest), plus the narrow Luau source/provenance entries.
 #
 # The prepack guard (scripts/assert-publish-grammar-coverage.cjs, also
 # `npm run assert-publish-coverage`) reads `files` and FAILS the publish
